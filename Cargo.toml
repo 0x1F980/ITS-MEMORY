@@ -1,0 +1,27 @@
+[package]
+name = "its_memory"
+version = "0.1.0"
+edition = "2021"
+description = "ITS-MEMORY / ITS-COIN — neutral wire mirrors and activity directory"
+license = "GPL-3.0-only"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "its-memory"
+path = "src/bin/its_memory.rs"
+
+[[bin]]
+name = "its-coin"
+path = "src/bin/its_coin.rs"
+
+[dependencies]
+base64 = "0.22"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

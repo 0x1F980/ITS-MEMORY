@@ -2,9 +2,13 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MemError, Result};
 use crate::pipe::{self, parse_ssc_link0_hex, sss_chain_generate, sss_chain_validate};
-use crate::store::list_pins;
+use crate::host::{self, contrib_fp, hosted_seconds};
+use crate::mirror::list_published_pins;
 use crate::vault::normalize_pk;
-use crate::wire::{room_id_fingerprint, CoinManifest, MemoryPin};
+use crate::store::list_pins;
+use crate::wire::{room_id_fingerprint, ChannelCoinManifest, MemoryPin};
+
+pub type CoinManifest = ChannelCoinManifest;
 
 pub const COIN_LINK_BYTE_LEN: usize = 16;
 
@@ -16,18 +20,39 @@ pub struct MintOptions {
     pub decrypt_sk: Option<PathBuf>,
     pub quorum_replicas: Option<u64>,
     pub ssc_out: Option<PathBuf>,
+    pub require_published: bool,
+    pub registry_visible: bool,
 }
 
 pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
     let pk_norm = normalize_pk(&opts.room_wire_pk);
-    let pins = if let Some(ref dir) = opts.pin_dir {
+    let pins = if opts.require_published {
+        if let Some(ref dir) = opts.pin_dir {
+            load_pins_from_dir(dir, &pk_norm)?
+        } else {
+            list_published_pins(&pk_norm)?
+        }
+    } else if let Some(ref dir) = opts.pin_dir {
         load_pins_from_dir(dir, &pk_norm)?
     } else {
         list_pins(&pk_norm)?
     };
     if pins.is_empty() {
+        if opts.require_published {
+            return Err(MemError::Coin(
+                "no published pins to mint (run its-memory publish-pins first)".into(),
+            ));
+        }
         return Err(MemError::Coin("no pins to mint".into()));
     }
+
+    let memory_bytes: u64 = pins
+        .iter()
+        .map(|p| p.wire_bytes().map(|b| b.len() as u64))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .sum();
+    let hosted_secs = hosted_seconds(&pk_norm)?;
 
     let mut last_seq = 0u64;
     let mut last_pool_epoch = 0u64;
@@ -82,7 +107,11 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         frame_count: pins.len() as u64,
         last_seq,
         last_pool_epoch,
+        memory_bytes,
+        hosted_seconds: hosted_secs,
+        registry_visible: opts.registry_visible,
         quorum_replicas: opts.quorum_replicas,
+        host_fp: Some(contrib_fp()?),
     })
 }
 
@@ -100,6 +129,8 @@ pub fn validate_coin(
         decrypt_sk: decrypt_sk.map(|p| p.to_path_buf()),
         quorum_replicas: manifest.quorum_replicas,
         ssc_out: None,
+        require_published: manifest.memory_bytes > 0 || manifest.hosted_seconds > 0,
+        registry_visible: manifest.registry_visible,
     })?;
     if recomputed.chain_root != manifest.chain_root {
         return Err(MemError::Coin(format!(
@@ -110,10 +141,14 @@ pub fn validate_coin(
     if recomputed.frame_count != manifest.frame_count {
         return Err(MemError::Coin("frame_count mismatch".into()));
     }
+    if recomputed.memory_bytes != manifest.memory_bytes && manifest.memory_bytes > 0 {
+        return Err(MemError::Coin("memory_bytes mismatch".into()));
+    }
     println!(
-        "Validated ITS-COIN/1 room_wire_pk={}… frames={} root={}… (SSS link_0)",
+        "Validated ITS-CHANNEL-COIN room_wire_pk={}… frames={} memory_bytes={} root={}… (SSS link_0)",
         &manifest.room_wire_pk[..8.min(manifest.room_wire_pk.len())],
         manifest.frame_count,
+        manifest.memory_bytes,
         &manifest.chain_root[..8.min(manifest.chain_root.len())]
     );
     Ok(())

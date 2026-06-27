@@ -1,7 +1,11 @@
 pub mod coin;
 pub mod directory;
+pub mod epoch_map;
 pub mod error;
 pub mod fetch;
+pub mod gdir;
+pub mod host;
+pub mod mirror;
 pub mod pin;
 pub mod pipe;
 pub mod store;

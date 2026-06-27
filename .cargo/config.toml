@@ -1,0 +1,2 @@
+[patch."ssh://git@github.com/0x1F980/ITS-hardware.git"]
+its_hardware = { path = "/home/user/sidechannel_resistant_hardware" }

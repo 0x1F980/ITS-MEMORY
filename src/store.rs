@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 
 use crate::error::Result;
+use crate::host;
 use crate::vault::{ensure_layout, normalize_pk, pin_room_dir};
 use crate::wire::{wire_filename_tag, wire_identity, MemoryPin};
 
@@ -17,6 +18,8 @@ pub fn store_pin(pin: &MemoryPin) -> Result<PathBuf> {
     let tag = wire_filename_tag(&wire);
     let path = dir.join(format!("{tag}.pin"));
     pin.write_file(&path)?;
+    let wire = pin.wire_bytes()?;
+    let _ = host::touch_room_pin(&pin.room_wire_pk, wire.len() as u64);
     Ok(path)
 }
 

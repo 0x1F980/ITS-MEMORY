@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# M43 — publish 2 rooms; browse sorts; without secret → decrypt fails (0 bits).
+# M46 — channel browse --sort memory_bytes vs frame_count ranks correctly.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CHAT_ROOT="${ITS_CHAT_DIR:-/home/user/ITS-CHAT}"
 ROUTING_ROOT="${ITS_ROUTING_DIR:-/home/user/ROUTING}"
 ASYM="${ITS_ASYMMETRIC_DIR:-/home/user/ITS-asymmetric}"
+SSS_ROOT="${SSS_CHAIN_DIR:-/home/user/SSS_CHAIN}"
 
-TMP="${TMPDIR:-/tmp}/its_memory_dir_$$"
+TMP="${TMPDIR:-/tmp}/its_memory_m46_$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -20,16 +21,14 @@ cargo build --release --manifest-path "$ASYM/Cargo.toml" --bin its_asymmetric \
   --features "${ITS_ASYM_FEATURES:-bundle,parallel,std,compact-wire}" --quiet
 cargo build --release --manifest-path "$ROUTING_ROOT/its_routing/Cargo.toml" --quiet
 cargo build --release --manifest-path "$CHAT_ROOT/Cargo.toml" --quiet
-SSS_ROOT="${SSS_CHAIN_DIR:-/home/user/SSS_CHAIN}"
 cargo build --release --manifest-path "$SSS_ROOT/Cargo.toml" --quiet
 cargo build --release --manifest-path "$ROOT/Cargo.toml" --quiet
 
-ITS="$ASYM/target/release/its_asymmetric"
 CHAT="$CHAT_ROOT/target/release/its-chat"
-COIN="$ROOT/target/release/its-coin"
 MEMORY="$ROOT/target/release/its-memory"
+COIN="$ROOT/target/release/its-coin"
 
-export ITS_ASYMMETRIC_BIN="$ITS"
+export ITS_ASYMMETRIC_BIN="$ASYM/target/release/its_asymmetric"
 export ITS_ROUTING_BIN="$ROUTING_ROOT/target/release/its-routing"
 export ITS_MEMORY_BIN="$MEMORY"
 export SSS_CHAIN_BIN="$SSS_ROOT/target/release/sss_chain"
@@ -48,10 +47,12 @@ fountain_enabled = false
 EOF
 CFG="$ITS_CHAT_HOME/routing.toml"
 SEED="$ITS_MEMORY_HOME/ratchet.seed"
+BULK_PAYLOAD="$(python3 -c 'print("X"*3500)')"
 
 mint_room() {
   local alias=$1
   local count=$2
+  local msg_fn=$3
   "$CHAT" room create --alias "$alias" --type chat
   local room_dir="$ITS_CHAT_HOME/rooms/$alias"
   local pk rid
@@ -63,7 +64,9 @@ mint_room() {
   local i
   for ((i=1; i<=count; i++)); do
     rm -rf "$POOL"/*
-    "$CHAT" send --room "$alias" --message "msg $i"
+    local msg
+    msg="$("$msg_fn" "$i")"
+    "$CHAT" send --room "$alias" --message "$msg"
     sleep 5
     "$MEMORY" pin --room-wire-pk "$pk" -c "$CFG" --ratchet-seed "$ITS_MEMORY_HOME/ratchet.seed" \
       --max-messages 1 --timeout-secs 90 \
@@ -74,35 +77,29 @@ mint_room() {
   "$MEMORY" fetch --room-wire-pk "$pk" --out "$pins" \
     --filter-pk "$room_dir/public.key" --filter-sk "$room_dir/secret.key"
   local man="$TMP/${alias}.coin.toml"
-  "$COIN" mint --room-wire-pk "$pk" --pin-dir "$pins" --out "$man" \
+  "$COIN" channel mint --room-wire-pk "$pk" --pin-dir "$pins" --out "$man" \
     --decrypt-pk "$room_dir/public.key" --decrypt-sk "$room_dir/secret.key" --room-id "$rid"
-  "$COIN" publish --manifest "$man" --registry "$REG"
+  "$COIN" channel publish --manifest "$man" --registry "$REG"
   echo "$pk"
 }
 
-echo "== mint + publish quiet + loud rooms =="
-mint_room quiet 1 >/dev/null
-LOUD_PK="$(mint_room loud 5)"
+small_msg() { echo "tiny-$1"; }
+big_msg() { echo "${BULK_PAYLOAD}-$1"; }
 
-echo "== browse sorted by frame_count =="
-BROWSE="$("$COIN" browse --sort frame_count --registry "$REG")"
-echo "$BROWSE"
-FIRST="$(echo "$BROWSE" | head -1)"
-echo "$FIRST" | grep -q "$LOUD_PK" || { echo "FAIL: loudest room should sort first" >&2; exit 1; }
+echo "== chatty (5 small) + bulky (2 large) rooms =="
+CHATTY_PK="$(mint_room chatty 5 small_msg)"
+BULKY_PK="$(mint_room bulky 2 big_msg)"
 
-echo "== search min-frames 3 =="
-SEARCH="$("$COIN" search --min-frames 3 --registry "$REG")"
-echo "$SEARCH"
-echo "$SEARCH" | grep -q "$LOUD_PK" || { echo "FAIL: loud room missing from search" >&2; exit 1; }
+echo "== sort by frame_count: chatty first =="
+BY_FRAMES="$("$COIN" channel browse --sort frame_count --registry "$REG")"
+echo "$BY_FRAMES"
+FIRST_FRAME="$(echo "$BY_FRAMES" | head -1)"
+echo "$FIRST_FRAME" | grep -q "$CHATTY_PK" || { echo "FAIL: chatty should rank first by frame_count" >&2; exit 1; }
 
-echo "== outsider without secret cannot decrypt pin =="
-OUTSIDER="$TMP/outsider"
-"$ITS" keygen --out-dir "$OUTSIDER"
-WIRE="$(find "$TMP/pins_loud" -name '*.wire' | head -1)"
-if "$ITS" decrypt --pk "$OUTSIDER/public.key" --sk "$OUTSIDER/secret.key" --in "$WIRE" --out "$TMP/bad.frame" 2>"$TMP/decrypt.err"; then
-  echo "FAIL: decrypt should fail without room capability" >&2
-  exit 1
-fi
-test -s "$TMP/decrypt.err" || true
+echo "== sort by memory_bytes: bulky first =="
+BY_BYTES="$("$COIN" channel browse --sort memory_bytes --registry "$REG")"
+echo "$BY_BYTES"
+FIRST_BYTES="$(echo "$BY_BYTES" | head -1)"
+echo "$FIRST_BYTES" | grep -q "$BULKY_PK" || { echo "FAIL: bulky should rank first by memory_bytes" >&2; exit 1; }
 
-echo "pipe_its_memory_directory_e2e.sh: OK (M43)"
+echo "pipe_its_memory_browse_sort_e2e.sh: OK (M46)"

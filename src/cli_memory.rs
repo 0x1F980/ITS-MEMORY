@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use crate::error::{MemError, Result};
 use crate::fetch::{FetchOptions, run_fetch};
+use crate::host;
+use crate::mirror::publish_pins;
 use crate::pin::{run_pin, PinOptions};
 use crate::vault::ratchet_seed_path;
 
@@ -15,6 +17,8 @@ pub fn run_cli(program: &str) -> Result<()> {
     match args[1].as_str() {
         "pin" => cmd_pin(&args[2..]),
         "fetch" => cmd_fetch(&args[2..]),
+        "publish-pins" => cmd_publish_pins(&args[2..]),
+        "host-status" => cmd_host_status(&args[2..]),
         "-h" | "--help" | "help" => {
             print_usage(program);
             Ok(())
@@ -58,14 +62,54 @@ fn cmd_fetch(args: &[String]) -> Result<()> {
     let from_epoch = flag_str(args, "--from-epoch")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let to_epoch = flag_str(args, "--to-epoch").and_then(|s| s.parse().ok());
+    let from_seq_hint = flag_str(args, "--from-seq-hint").and_then(|s| s.parse().ok());
+    let limit = flag_str(args, "--limit").and_then(|s| s.parse().ok());
+    let routing_config = flag_path(args, "--routing-config");
+    let _epoch_map = crate::epoch_map::EpochMap::from_env_and_options(
+        routing_config.as_deref(),
+        flag_str(args, "--epoch-interval-ms").and_then(|s| s.parse().ok()),
+    )?;
     let opts = FetchOptions {
         room_wire_pk,
         out_dir: out,
         from_epoch,
+        to_epoch,
+        from_seq_hint,
+        limit,
         filter_pk: flag_path(args, "--filter-pk"),
         filter_sk: flag_path(args, "--filter-sk"),
+        mirror_dir: flag_path(args, "--mirror-dir"),
     };
     run_fetch(&opts).map(|_| ())
+}
+
+fn cmd_publish_pins(args: &[String]) -> Result<()> {
+    let room_wire_pk = flag_str(args, "--room-wire-pk")
+        .ok_or_else(|| MemError::Usage("--room-wire-pk HEX".into()))?;
+    publish_pins(&room_wire_pk).map(|_| ())
+}
+
+fn cmd_host_status(args: &[String]) -> Result<()> {
+    let room_wire_pk = flag_str(args, "--room-wire-pk")
+        .ok_or_else(|| MemError::Usage("--room-wire-pk HEX".into()))?;
+    match host::room_host_status(&room_wire_pk)? {
+        Some(entry) => {
+            let hosted = host::hosted_seconds(&room_wire_pk)?;
+            println!(
+                "room_wire_pk={} pin_count={} memory_bytes={} hosted_seconds={} first_seen={} last_seen={} first_published={:?}",
+                entry.room_wire_pk,
+                entry.pin_count,
+                entry.memory_bytes,
+                hosted,
+                entry.first_seen,
+                entry.last_seen,
+                entry.first_published
+            );
+        }
+        None => println!("No local host ledger entry for room_wire_pk={room_wire_pk}"),
+    }
+    Ok(())
 }
 
 fn flag_str(args: &[String], name: &str) -> Option<String> {
@@ -91,8 +135,11 @@ fn print_usage(program: &str) {
 Usage:
   {program} pin --room-wire-pk HEX -c routing.toml [--follow] [--max-messages N] \\
     [--ratchet-seed PATH] [--filter-pk PATH --filter-sk PATH] [--timeout-secs N]
-  {program} fetch --room-wire-pk HEX --out DIR [--from-epoch N] \\
+  {program} fetch --room-wire-pk HEX --out DIR [--from-epoch N] [--to-epoch M] [--limit K] \\
+    [--from-seq-hint N] [--mirror-dir PATH] [--routing-config PATH] [--epoch-interval-ms MS] \\
     [--filter-pk PATH --filter-sk PATH]
+  {program} publish-pins --room-wire-pk HEX
+  {program} host-status --room-wire-pk HEX
 "
     );
 }

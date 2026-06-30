@@ -282,15 +282,7 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "sss_chain"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "its_self_enclosed_timelock"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "its_hardware"
+name = "its_otm_public_attestation"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -298,8 +290,16 @@ name = "its_fingerprint_erasure"
 version = "0.8.1"
 
 [[patch.unused]]
+name = "its_self_enclosed_timelock"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "its_ledger"
 version = "1.1.0"
+
+[[patch.unused]]
+name = "sss_chain"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "its_routing"
@@ -310,5 +310,5 @@ name = "its_transport"
 version = "1.1.0"
 
 [[patch.unused]]
-name = "its_otm_public_attestation"
+name = "its_hardware"
 version = "0.1.0"

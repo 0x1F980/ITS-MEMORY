@@ -24,6 +24,28 @@ ITS-MEMORY and ITS-COIN form a **proof-of-hosting activity directory** for ITS-C
 
 ---
 
+## §0.2 Dual coin model (Fase 7)
+
+**Two coins, two purposes — not the same thing:**
+
+| | **CHANNEL coin** (`ITS-CHANNEL-COIN/3`) | **GDIR coin** (`ITS-GDIR-COIN/1`) |
+|---|----------------------------------------|-----------------------------------|
+| **Purpose** | **Memory proof** — host preserved channel history (messages as ciphertext pins) | **Blind global directory infra** — phonebook without channel knowledge |
+| **Identity** | `room_wire_pk`, `room_id_fp`, SSS `chain_root` over pin bytes | `contrib_fp` only — **no** `room_wire_pk` |
+| **Memory value** | Per-channel (`memory_weight_seconds`, bytes, pin lifetime) | Flat infra (`contrib_*`) — **not** channel ranking |
+| **Host knows** | Which channel (required for channel mint/validate) | **Intentionally not** which channels shards belong to (GDIR blind role) |
+| **Registry** | `coin/channel/registry/` — activity + quiet discovery | `coin/gdir/registry/` — flatten merge, blind assignment |
+| **Deletion** | Remove pins → SSS validate fails → coin dysfunctional | Break shard-set → GDIR validate fails |
+
+**Worked example:**
+
+- **CHANNEL:** “plaza has hosted 500 pins for 90 days” → `memory_weight_seconds` = Σ hosted duration per pin.
+- **GDIR:** “I helped 12 blind shards without room names” → `contrib_fp` + blind shard receipts.
+
+**Operator rule:** CHANNEL coin ≠ GDIR coin. Join still uses CHAT registry OOB; COIN registries rank **activity** and **infra duty** separately.
+
+---
+
 ## §0.1 Worked example (read this first)
 
 **Setup:** Two open chat rooms publish channel coins to the same registry. Both have `registry_visible: true`.
@@ -77,8 +99,14 @@ Only rooms with ≤5 frames match — `spam-room` (100 frames) is excluded; `qui
 | **P8** | **Quiet discovery:** Channel browse/search supports `--order asc|desc` and max/min activity filters (`--max-frames`, `--min-frames`, etc.). Preset: `discover-quiet` / `--discover quiet`. |
 | **P9** | **Pseudonym fingerprints:** `host_fp` (channel coin) and `contrib_fp` (GDIR) are 16-hex pseudonyms from local `host.secret` — not “no identity,” but no legal-name binding. |
 | **P10** | **Non-claim:** No automatic token reward, payment, or mining payout from coin mint alone. |
-| **P11** | **Non-claim:** ITS-timelock + coin coupling (Fase 6) not enforced in v1. |
-| **P12** | **Non-claim:** Pool ingest of coin manifests is optional (`sync_registry_pool.sh` publish only); `quorum_replicas` field is not enforced by directory code. |
+| **P11** | **Timelock + CHANNEL coin:** Optional `timelock_epoch_span`, `timelock_sealed_frames`; `memory_weight_seconds` credits only pins with `pool_epoch ≥ unlock_epoch` (gate M59). GDIR unchanged. |
+| **P12** | **Pool ingest:** `its-coin channel|gdir ingest-pool` pulls manifests from ROUTING pool; `sync_registry_pool.sh --pull` (gate M54). |
+| **P13** | **Dual coin:** CHANNEL = memory preservation proof; GDIR = blind flat phonebook infra. Separate registries, separate mint paths. |
+| **P14** | **Quorum witnesses:** `ITS-MEMORY-WITNESS/1`; mint with `--require-quorum K` needs ≥K distinct `witness_fp` agreeing on `chain_root` + `pin_set_hash` (gate M55). |
+| **P15** | **Blind GDIR:** `ITS-MEMORY-SHARD/1` stored under `blind_shards/` with **no** `room_wire_pk`; VRF `shard_id` assignment; `its-memory blind-pull` (gates M57/M58). Blindness applies to GDIR role only — CHANNEL host knows room when minting memory coin. |
+| **P16** | **Flatten merge:** Cap single entry share in merged browse view (default 5% / `--cap-bps 500`); `discover-quiet-flat`, `gdir discover-flat` (gate M56). |
+| **P17** | **Duty mint:** `--global` requires `--require-published`, GDIR receipt, and quorum; rank = directory sort only — no token payout (P10). |
+| **P18** | **Memory–coin bind:** Destroying published pins breaks `channel validate` / `chain_root` (gates M53/M61). |
 
 ---
 
@@ -91,10 +119,14 @@ Only rooms with ≤5 frames match — `spam-room` (100 frames) is excluded; `qui
 | `pin_epoch_span` | `max(pool_epoch) − min(pool_epoch)` over pins | Message batch time window (pool epochs) |
 | `message_hosted_span_seconds` | `max(published_at) − min(published_at)` from `.published` markers | Per-pin publish span (0 if single pin) |
 | `hosted_seconds` *(doc: mirror_listed_seconds)* | `now − first_published` from host ledger | Channel mirror listing duration |
+| `memory_weight_seconds` | Σ `(now − published_at)` per published pin (v3) | **Channel coin only** — memory preservation weight |
+| `pin_hosted_min_seconds` / `pin_hosted_max_seconds` | Per-pin hosted duration stats (v3) | Channel coin |
+| `timelock_epoch_span` / `timelock_sealed_frames` | Sealed pins below unlock epoch (v3) | Channel coin + ITS-CHAT timelock |
+| `witness_count` | Distinct agreeing witnesses (merge/ingest) | Channel coin |
 | `last_pool_epoch` | Latest pin pool epoch | Channel coin |
 | `contrib_bytes` / `contrib_seconds` / `contrib_ops` | Aggregated GDIR infra ledger | GDIR coin only |
 
-**Distinction:** `mirror_listed_seconds` measures how long the channel has been listed on **this host's mirror** since first publish. `message_hosted_span_seconds` measures the **spread of pin publish timestamps** — closer to “how long messages have been hosted” as a batch.
+**Distinction:** GDIR does **not** get `memory_weight_seconds`. `mirror_listed_seconds` measures channel listing time on this host; `memory_weight_seconds` measures cumulative per-pin preservation duty.
 
 ---
 
@@ -116,6 +148,28 @@ Confirm or reject each item against `src/` and gate scripts:
 | 10 | `pin_epoch_span` + `message_hosted_span_seconds` computed | M52 |
 | 11 | Hidden registry absent from browse | M45 (CHAT) |
 | 12 | No plaintext in coin/pin wire without room secret | KEEP_BOUNDARY |
+| 13 | Pool ingest A publish → B browse | M54 |
+| 14 | Quorum `--require-quorum K` anti-Eve self-list | M55 |
+| 15 | `memory_weight_seconds` + pin delete breaks validate | M53 |
+| 16 | Flatten merge anti-centralization | M56 |
+| 17 | Blind GDIR shards + mint from blind receipts | M57, M58 |
+| 18 | Timelock fields on CHANNEL coin | M59 |
+| 19 | Duty mint `--global` + destruction gates | M60, M61 |
+
+---
+
+## Fase 7 roadmap (status)
+
+| Phase | Deliverable | Gate | Status |
+|-------|-------------|------|--------|
+| **Del 0** | VISION v2 dual-coin, P13–P18, roadmap | — | **done** |
+| **7B** | `channel/gdir ingest-pool`, merge, `sync_registry_pool.sh --pull` | M54 | **done** |
+| **7C** | `ITS-MEMORY-WITNESS/1`, `--require-quorum` | M55 | **done** |
+| **7A** | CHANNEL v3 `memory_weight_seconds` | M53 | **done** |
+| **7E** | flatten, `discover-quiet-flat`, `gdir discover-flat` | M56 | **done** |
+| **7D** | `ITS-MEMORY-SHARD/1`, `blind-pull` | M57, M58 | **done** |
+| **7G** | timelock fields on CHANNEL coin | M59 | **done** |
+| **7H** | `--global` duty mint | M60, M61 | **done** |
 
 ---
 
@@ -132,23 +186,28 @@ its-memory fetch --room-wire-pk HEX --out DIR [--from-epoch N] [--to-epoch M] [-
 
 its-memory publish-pins --room-wire-pk HEX
 its-memory host-status --room-wire-pk HEX
+its-memory witness --room-wire-pk HEX --pin-dir PATH (--chain-root HEX | --manifest PATH)
+its-memory blind-pull -c routing.toml [--ratchet-seed PATH] [--max-messages N]
 ```
 
-### its-coin channel (ITS-CHANNEL-COIN/2)
+### its-coin channel (ITS-CHANNEL-COIN/3)
 
 ```
 its-coin channel mint --room-wire-pk HEX [--pin-dir PATH] [--out PATH]
-  [--require-published] [--registry-hidden]
+  [--require-published] [--registry-hidden] [--global] [--require-quorum K]
+  [--timelock-unlock-epoch N]
   [--decrypt-pk PATH --decrypt-sk PATH] [--room-id HEX] [--quorum-replicas N]
 
 its-coin channel validate --manifest PATH [--pin-dir PATH]
 its-coin channel publish --manifest PATH [--registry PATH] [--record-gdir]
   [-c routing.toml --ratchet-seed PATH]
+its-coin channel ingest-pool -c routing.toml --ratchet-seed PATH [--registry PATH]
 
-its-coin channel browse [--sort frame_count|last_epoch|memory_bytes|hosted_seconds]
+its-coin channel browse [--sort frame_count|memory_bytes|memory_weight_seconds|hosted_seconds|last_epoch]
   [--order asc|desc] [--discover quiet] [--registry PATH]
 
 its-coin channel discover-quiet [--registry PATH]
+its-coin channel discover-quiet-flat [--cap-bps 500] [--registry PATH]
 
 its-coin channel search [--min-frames N] [--max-frames N]
   [--max-memory-bytes N] [--max-hosted-seconds N]
@@ -158,26 +217,30 @@ its-coin channel search [--min-frames N] [--max-frames N]
 ### its-coin gdir (ITS-GDIR-COIN/1)
 
 ```
-its-coin gdir record --op mirror|sync|route [--byte-span N]
-its-coin gdir mint [--out PATH]
+its-coin gdir record --op mirror|sync|route|blind [--byte-span N]
+its-coin gdir mint [--out PATH] [--require-blind]
 its-coin gdir validate --manifest PATH
 its-coin gdir publish --manifest PATH [--registry PATH]
+its-coin gdir ingest-pool -c routing.toml --ratchet-seed PATH [--registry PATH]
 its-coin gdir browse [--sort contrib_ops|contrib_bytes|contrib_seconds]
-  [--order asc|desc] [--registry PATH]
+  [--order asc|desc] [--flatten] [--cap-bps 500]
+its-coin gdir discover-flat [--cap-bps 500] [--registry PATH]
 ```
 
 ---
 
-## Appendix B — Registry paths (two-registry model)
+## Appendix B — Registry paths (three-registry model)
 
 | Registry | Path | Owner | Contents |
 |----------|------|-------|----------|
-| **CHAT room registry** | `~/.its/chat/registry/<room_id>/` | ITS-CHAT | `public.key`, `room.toml`, `ITS-ROOM.manifest` — join OOB |
-| **COIN channel registry** | `$ITS_MEMORY_HOME/coin/channel/registry/*.channel.coin.toml` | ITS-MEMORY | Activity manifests (`frame_count`, metrics, `chain_root`) |
+| **CHAT join registry** | `~/.its/chat/registry/<room_id>/` | ITS-CHAT | `public.key`, `room.toml`, `ITS-ROOM.manifest` — join OOB |
+| **COIN channel registry** | `$ITS_MEMORY_HOME/coin/channel/registry/*.channel.coin.toml` | ITS-MEMORY | Activity manifests (`frame_count`, `memory_weight_seconds`, `chain_root`) |
 | **COIN GDIR registry** | `$ITS_MEMORY_HOME/coin/gdir/registry/*.gdir.coin.toml` | ITS-MEMORY | Infra contribution (`contrib_fp`, no room) |
+| **Witness store** | `$ITS_MEMORY_HOME/witnesses/<room_wire_pk>/` | ITS-MEMORY | `ITS-MEMORY-WITNESS/1` files |
+| **Blind shards** | `$ITS_MEMORY_HOME/blind_shards/` | ITS-MEMORY | `ITS-MEMORY-SHARD/1` (no `room_wire_pk`) |
 | **Legacy** | `$ITS_MEMORY_HOME/coin/registry/` | ITS-MEMORY | Migrated to channel registry on `ensure_layout()` |
 
-**Operator flow:** CHAT registry for **join keys**; COIN registry for **activity ranking** and quiet discovery.
+**Operator flow:** CHAT registry for **join keys**; CHANNEL coin registry for **memory/activity ranking**; GDIR registry for **blind infra duty**. CHANNEL coin ≠ GDIR coin.
 
 ---
 
@@ -195,9 +258,16 @@ No duplicate wire math or transport proofs in this repo.
 
 ---
 
-## Planned (out of v1 scope)
+## Non-claims (remain honest)
 
-- ITS-timelock + coin-kobling (Fase 6)
-- Pool **ingest** of coin manifests (publish-only in `sync_registry_pool.sh`)
-- Automatic belønning / token economy
-- `quorum_replicas` enforcement
+- Metadata-layer spam flood cannot be eliminated Shannon-style; flatten + quiet + quorum raise Eve cost.
+- CHANNEL host **knows** `room_wire_pk` when minting memory coin — blindness is **GDIR role only**.
+- CHAT join still OOB via `~/.its/chat/registry/`.
+- No cryptocurrency payout (P10).
+
+---
+
+## Out of scope (post Fase 7)
+
+- Automatic token economy / on-chain payout
+- Full global witness federation protocol (witness files copied/merged manually or via ingest today)

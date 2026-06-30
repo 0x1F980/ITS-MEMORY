@@ -77,25 +77,46 @@ Legacy `$ITS_MEMORY_HOME/coin/registry/` is migrated on first `ensure_layout()`.
 
 `chain_root` = SSS `link_0` hex from `sss_chain generate` over concatenated wire ciphertext bytes.
 
+## its-coin channel (ITS-CHANNEL-COIN/3)
+
+```
+its-coin channel mint --room-wire-pk HEX [--require-published] [--global] [--require-quorum K]
+  [--timelock-unlock-epoch N] [--pin-dir PATH] [--out PATH]
+its-coin channel ingest-pool -c routing.toml --ratchet-seed PATH [--registry PATH]
+its-coin channel discover-quiet-flat [--cap-bps 500]
+its-coin channel browse [--sort memory_weight_seconds|...] [--order asc|desc]
+```
+
+New v3 fields: `memory_weight_seconds`, `pin_hosted_min/max_seconds`, `timelock_*`, `witness_count`.
+
 ## its-coin gdir (ITS-GDIR-COIN/1)
 
 ```
-its-coin gdir record --op mirror|sync|route [--byte-span N]
-its-coin gdir mint [--out PATH]
-its-coin gdir publish --manifest PATH [--registry PATH]
-its-coin gdir browse [--sort contrib_ops|contrib_bytes|contrib_seconds] [--order asc|desc]
+its-coin gdir record --op mirror|sync|route|blind [--byte-span N]
+its-coin gdir mint [--require-blind] [--out PATH]
+its-coin gdir ingest-pool -c routing.toml --ratchet-seed PATH
+its-coin gdir discover-flat [--cap-bps 500]
+its-coin gdir browse [--flatten] [--order asc|desc]
 ```
 
 GDIR receipts and coins contain **no** `room_wire_pk` — aggregated directory infra only.
-`contrib_fp` is a 16-hex pseudonym from the same `host.secret` as channel `host_fp`.
+Blind shards: `ITS-MEMORY-SHARD/1` under `$ITS_MEMORY_HOME/blind_shards/` (no room identity on disk).
+
+## its-memory witness / blind-pull
+
+```
+its-memory witness --room-wire-pk HEX --pin-dir PATH (--chain-root HEX | --manifest PATH)
+its-memory blind-pull -c routing.toml [--ratchet-seed PATH] [--max-messages N]
+```
+
+Witness format: `ITS-MEMORY-WITNESS/1` — quorum anti-Eve self-list (gate M55).
 
 ## Pool registry sync (optional)
 
 ```
-bash scripts/sync_registry_pool.sh [--dry-run]
+bash scripts/sync_registry_pool.sh [--dry-run]          # publish local registries to pool
+bash scripts/sync_registry_pool.sh --pull [--max-messages N]  # ingest from pool
 ```
-
-Requires `ITS_ROUTING_CONFIG`, `ITS_RATCHET_SEED`, built `its-coin`.
 
 ## ITS-CHAT scroll
 

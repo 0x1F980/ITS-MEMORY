@@ -9,6 +9,9 @@ pub const PIN_MAGIC: &str = "ITS-MEMORY-PIN/1";
 /// Legacy channel coin (v1).
 pub const CHANNEL_COIN_V1_MAGIC: &str = "ITS-COIN/1";
 pub const CHANNEL_COIN_V2_MAGIC: &str = "ITS-CHANNEL-COIN/2";
+pub const CHANNEL_COIN_V3_MAGIC: &str = "ITS-CHANNEL-COIN/3";
+pub const WITNESS_MAGIC: &str = "ITS-MEMORY-WITNESS/1";
+pub const SHARD_MAGIC: &str = "ITS-MEMORY-SHARD/1";
 pub const GDIR_RECEIPT_MAGIC: &str = "ITS-GDIR-RECEIPT/1";
 pub const GDIR_COIN_MAGIC: &str = "ITS-GDIR-COIN/1";
 
@@ -126,6 +129,21 @@ pub struct ChannelCoinManifest {
     /// `max(published_at) - min(published_at)` over published pins (0 if single pin).
     #[serde(default)]
     pub message_hosted_span_seconds: u64,
+    /// Σ `(now − published_at)` per published pin — memory-preservation weight (v3).
+    #[serde(default)]
+    pub memory_weight_seconds: u64,
+    #[serde(default)]
+    pub pin_hosted_min_seconds: u64,
+    #[serde(default)]
+    pub pin_hosted_max_seconds: u64,
+    /// Timelock room: span of sealed pin pool epochs (v3).
+    #[serde(default)]
+    pub timelock_epoch_span: u64,
+    #[serde(default)]
+    pub timelock_sealed_frames: u64,
+    /// Distinct witness_fp count agreeing on chain_root + pin_set_hash (merge/ingest).
+    #[serde(default)]
+    pub witness_count: u64,
     #[serde(default = "default_registry_visible")]
     pub registry_visible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,7 +158,9 @@ fn default_registry_visible() -> bool {
 
 impl ChannelCoinManifest {
     pub fn serialize_text(&self) -> String {
-        let magic = if self.is_v2() {
+        let magic = if self.is_v3() {
+            CHANNEL_COIN_V3_MAGIC
+        } else if self.is_v2() {
             CHANNEL_COIN_V2_MAGIC
         } else {
             CHANNEL_COIN_V1_MAGIC
@@ -162,6 +182,26 @@ impl ChannelCoinManifest {
                 "message_hosted_span_seconds: {}\n",
                 self.message_hosted_span_seconds
             ));
+            if self.is_v3() {
+                out.push_str(&format!(
+                    "memory_weight_seconds: {}\n",
+                    self.memory_weight_seconds
+                ));
+                out.push_str(&format!(
+                    "pin_hosted_min_seconds: {}\n",
+                    self.pin_hosted_min_seconds
+                ));
+                out.push_str(&format!(
+                    "pin_hosted_max_seconds: {}\n",
+                    self.pin_hosted_max_seconds
+                ));
+                out.push_str(&format!("timelock_epoch_span: {}\n", self.timelock_epoch_span));
+                out.push_str(&format!(
+                    "timelock_sealed_frames: {}\n",
+                    self.timelock_sealed_frames
+                ));
+                out.push_str(&format!("witness_count: {}\n", self.witness_count));
+            }
             out.push_str(&format!(
                 "registry_visible: {}\n",
                 if self.registry_visible { "true" } else { "false" }
@@ -181,16 +221,29 @@ impl ChannelCoinManifest {
             || self.hosted_seconds > 0
             || self.pin_epoch_span > 0
             || self.message_hosted_span_seconds > 0
+            || self.is_v3()
             || !self.registry_visible
             || self.host_fp.is_some()
+    }
+
+    fn is_v3(&self) -> bool {
+        self.memory_weight_seconds > 0
+            || self.pin_hosted_min_seconds > 0
+            || self.pin_hosted_max_seconds > 0
+            || self.timelock_epoch_span > 0
+            || self.timelock_sealed_frames > 0
+            || self.witness_count > 0
     }
 
     pub fn parse_text(text: &str) -> Result<Self> {
         let lines: Vec<&str> = text.lines().collect();
         let magic = lines.first().map(|l| l.trim()).unwrap_or("");
-        if magic != CHANNEL_COIN_V1_MAGIC && magic != CHANNEL_COIN_V2_MAGIC {
+        if magic != CHANNEL_COIN_V1_MAGIC
+            && magic != CHANNEL_COIN_V2_MAGIC
+            && magic != CHANNEL_COIN_V3_MAGIC
+        {
             return Err(MemError::Coin(format!(
-                "missing {CHANNEL_COIN_V1_MAGIC} or {CHANNEL_COIN_V2_MAGIC}"
+                "missing {CHANNEL_COIN_V1_MAGIC}, {CHANNEL_COIN_V2_MAGIC}, or {CHANNEL_COIN_V3_MAGIC}"
             )));
         }
         let mut room_wire_pk = String::new();
@@ -203,6 +256,12 @@ impl ChannelCoinManifest {
         let mut hosted_seconds = 0u64;
         let mut pin_epoch_span = 0u64;
         let mut message_hosted_span_seconds = 0u64;
+        let mut memory_weight_seconds = 0u64;
+        let mut pin_hosted_min_seconds = 0u64;
+        let mut pin_hosted_max_seconds = 0u64;
+        let mut timelock_epoch_span = 0u64;
+        let mut timelock_sealed_frames = 0u64;
+        let mut witness_count = 0u64;
         let mut registry_visible = true;
         let mut quorum_replicas = None;
         let mut host_fp = None;
@@ -243,6 +302,36 @@ impl ChannelCoinManifest {
                     .trim()
                     .parse()
                     .map_err(|_| MemError::Coin("message_hosted_span_seconds".into()))?;
+            } else if let Some(v) = line.strip_prefix("memory_weight_seconds:") {
+                memory_weight_seconds = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("memory_weight_seconds".into()))?;
+            } else if let Some(v) = line.strip_prefix("pin_hosted_min_seconds:") {
+                pin_hosted_min_seconds = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("pin_hosted_min_seconds".into()))?;
+            } else if let Some(v) = line.strip_prefix("pin_hosted_max_seconds:") {
+                pin_hosted_max_seconds = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("pin_hosted_max_seconds".into()))?;
+            } else if let Some(v) = line.strip_prefix("timelock_epoch_span:") {
+                timelock_epoch_span = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("timelock_epoch_span".into()))?;
+            } else if let Some(v) = line.strip_prefix("timelock_sealed_frames:") {
+                timelock_sealed_frames = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("timelock_sealed_frames".into()))?;
+            } else if let Some(v) = line.strip_prefix("witness_count:") {
+                witness_count = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("witness_count".into()))?;
             } else if let Some(v) = line.strip_prefix("registry_visible:") {
                 registry_visible = matches!(v.trim(), "true" | "1" | "yes");
             } else if let Some(v) = line.strip_prefix("quorum_replicas:") {
@@ -265,6 +354,12 @@ impl ChannelCoinManifest {
             hosted_seconds,
             pin_epoch_span,
             message_hosted_span_seconds,
+            memory_weight_seconds,
+            pin_hosted_min_seconds,
+            pin_hosted_max_seconds,
+            timelock_epoch_span,
+            timelock_sealed_frames,
+            witness_count,
             registry_visible,
             quorum_replicas,
             host_fp,
@@ -286,6 +381,7 @@ pub enum GdirOp {
     Mirror,
     Sync,
     Route,
+    Blind,
 }
 
 impl GdirOp {
@@ -294,8 +390,9 @@ impl GdirOp {
             "mirror" => Ok(Self::Mirror),
             "sync" => Ok(Self::Sync),
             "route" => Ok(Self::Route),
+            "blind" => Ok(Self::Blind),
             _ => Err(MemError::Coin(format!(
-                "unknown gdir op: {s} (mirror|sync|route)"
+                "unknown gdir op: {s} (mirror|sync|route|blind)"
             ))),
         }
     }
@@ -305,6 +402,7 @@ impl GdirOp {
             Self::Mirror => "mirror",
             Self::Sync => "sync",
             Self::Route => "route",
+            Self::Blind => "blind",
         }
     }
 }
@@ -431,6 +529,133 @@ impl GdirCoinManifest {
             contrib_ops,
             contrib_bytes,
             contrib_seconds,
+        })
+    }
+
+    pub fn write_file(&self, path: &Path) -> Result<()> {
+        std::fs::write(path, self.serialize_text())?;
+        Ok(())
+    }
+
+    pub fn read_file(path: &Path) -> Result<Self> {
+        Self::parse_text(&std::fs::read_to_string(path)?)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryWitness {
+    pub room_wire_pk: String,
+    pub chain_root: String,
+    pub pin_set_hash: String,
+    pub witness_fp: String,
+    pub epoch: u64,
+}
+
+impl MemoryWitness {
+    pub fn serialize_text(&self) -> String {
+        format!(
+            "{WITNESS_MAGIC}\nroom_wire_pk: {}\nchain_root: {}\npin_set_hash: {}\nwitness_fp: {}\nepoch: {}\n",
+            self.room_wire_pk, self.chain_root, self.pin_set_hash, self.witness_fp, self.epoch
+        )
+    }
+
+    pub fn parse_text(text: &str) -> Result<Self> {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.first().map(|l| l.trim()) != Some(WITNESS_MAGIC) {
+            return Err(MemError::Coin(format!("missing {WITNESS_MAGIC}")));
+        }
+        let mut room_wire_pk = String::new();
+        let mut chain_root = String::new();
+        let mut pin_set_hash = String::new();
+        let mut witness_fp = String::new();
+        let mut epoch = 0u64;
+        for line in &lines[1..] {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("room_wire_pk:") {
+                room_wire_pk = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("chain_root:") {
+                chain_root = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("pin_set_hash:") {
+                pin_set_hash = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("witness_fp:") {
+                witness_fp = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("epoch:") {
+                epoch = v.trim().parse().map_err(|_| MemError::Coin("epoch".into()))?;
+            }
+        }
+        if room_wire_pk.is_empty() || chain_root.is_empty() || witness_fp.is_empty() {
+            return Err(MemError::Coin("incomplete witness".into()));
+        }
+        Ok(Self {
+            room_wire_pk,
+            chain_root,
+            pin_set_hash,
+            witness_fp,
+            epoch,
+        })
+    }
+
+    pub fn write_file(&self, path: &Path) -> Result<()> {
+        std::fs::write(path, self.serialize_text())?;
+        Ok(())
+    }
+
+    pub fn read_file(path: &Path) -> Result<Self> {
+        Self::parse_text(&std::fs::read_to_string(path)?)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlindShard {
+    pub shard_id: String,
+    pub epoch: u64,
+    pub wire_b64: String,
+    pub wire_hash: String,
+}
+
+impl BlindShard {
+    pub fn serialize_text(&self) -> String {
+        format!(
+            "{SHARD_MAGIC}\nshard_id: {}\nepoch: {}\nwire_hash: {}\nwire_b64: {}\n",
+            self.shard_id, self.epoch, self.wire_hash, self.wire_b64
+        )
+    }
+
+    pub fn parse_text(text: &str) -> Result<Self> {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.first().map(|l| l.trim()) != Some(SHARD_MAGIC) {
+            return Err(MemError::Coin(format!("missing {SHARD_MAGIC}")));
+        }
+        let mut shard_id = String::new();
+        let mut epoch = 0u64;
+        let mut wire_b64 = String::new();
+        let mut wire_hash = String::new();
+        for line in &lines[1..] {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("shard_id:") {
+                shard_id = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("epoch:") {
+                epoch = v.trim().parse().map_err(|_| MemError::Coin("epoch".into()))?;
+            } else if let Some(v) = line.strip_prefix("wire_hash:") {
+                wire_hash = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("wire_b64:") {
+                wire_b64 = v.trim().to_string();
+            }
+        }
+        if shard_id.is_empty() || wire_b64.is_empty() {
+            return Err(MemError::Coin("incomplete blind shard".into()));
+        }
+        if wire_hash.is_empty() {
+            let wire = base64::engine::general_purpose::STANDARD
+                .decode(wire_b64.trim())
+                .map_err(|e| MemError::Wire(format!("wire_b64: {e}")))?;
+            wire_hash = wire_identity(&wire);
+        }
+        Ok(Self {
+            shard_id,
+            epoch,
+            wire_b64,
+            wire_hash,
         })
     }
 

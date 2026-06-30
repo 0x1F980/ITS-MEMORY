@@ -7,6 +7,9 @@ use crate::host;
 use crate::mirror::publish_pins;
 use crate::pin::{run_pin, PinOptions};
 use crate::vault::ratchet_seed_path;
+use crate::witness::{write_witness, write_witness_from_manifest};
+use crate::blind::run_blind_pull;
+use crate::wire::ChannelCoinManifest;
 
 pub fn run_cli(program: &str) -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -19,6 +22,8 @@ pub fn run_cli(program: &str) -> Result<()> {
         "fetch" => cmd_fetch(&args[2..]),
         "publish-pins" => cmd_publish_pins(&args[2..]),
         "host-status" => cmd_host_status(&args[2..]),
+        "witness" => cmd_witness(&args[2..]),
+        "blind-pull" => cmd_blind_pull(&args[2..]),
         "-h" | "--help" | "help" => {
             print_usage(program);
             Ok(())
@@ -112,6 +117,41 @@ fn cmd_host_status(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn cmd_witness(args: &[String]) -> Result<()> {
+    let room_wire_pk = flag_str(args, "--room-wire-pk")
+        .ok_or_else(|| MemError::Usage("--room-wire-pk HEX".into()))?;
+    if let Some(manifest_path) = flag_path(args, "--manifest") {
+        let manifest = ChannelCoinManifest::read_file(&manifest_path)?;
+        let pin_dir = flag_path(args, "--pin-dir")
+            .ok_or_else(|| MemError::Usage("--pin-dir PATH (with --manifest)".into()))?;
+        let pins = crate::coin::load_pins_for_witness(&pin_dir, &manifest.room_wire_pk)?;
+        write_witness_from_manifest(&manifest, &pins)?;
+    } else {
+        let chain_root = flag_str(args, "--chain-root")
+            .ok_or_else(|| MemError::Usage("--chain-root HEX or --manifest PATH".into()))?;
+        let pin_dir = flag_path(args, "--pin-dir")
+            .ok_or_else(|| MemError::Usage("--pin-dir PATH".into()))?;
+        let pk_norm = crate::vault::normalize_pk(&room_wire_pk);
+        let pins = crate::coin::load_pins_for_witness(&pin_dir, &pk_norm)?;
+        write_witness(&pk_norm, &chain_root, &pins, None)?;
+    }
+    Ok(())
+}
+
+fn cmd_blind_pull(args: &[String]) -> Result<()> {
+    let config = flag_path(args, "-c")
+        .or_else(|| flag_path(args, "--pool-config"))
+        .ok_or_else(|| MemError::Usage("-c routing.toml".into()))?;
+    let ratchet = ratchet_seed_path(flag_path(args, "--ratchet-seed").as_deref());
+    let max = flag_str(args, "--max-messages")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
+    let timeout = flag_str(args, "--timeout-secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    run_blind_pull(&config, &ratchet, max, timeout).map(|_| ())
+}
+
 fn flag_str(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
@@ -140,6 +180,8 @@ Usage:
     [--filter-pk PATH --filter-sk PATH]
   {program} publish-pins --room-wire-pk HEX
   {program} host-status --room-wire-pk HEX
+  {program} witness --room-wire-pk HEX --pin-dir PATH (--chain-root HEX | --manifest PATH)
+  {program} blind-pull -c routing.toml [--ratchet-seed PATH] [--max-messages N] [--timeout-secs N]
 "
     );
 }

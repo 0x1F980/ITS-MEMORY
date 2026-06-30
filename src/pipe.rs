@@ -57,6 +57,17 @@ pub fn its_routing_receive_once(
     timeout_secs: u64,
     from_epoch: u64,
 ) -> Result<ReceiveOutput> {
+    its_routing_receive_once_opts(config, ratchet_seed, out_wire, timeout_secs, from_epoch, true)
+}
+
+pub fn its_routing_receive_once_opts(
+    config: &Path,
+    ratchet_seed: &Path,
+    out_wire: &Path,
+    timeout_secs: u64,
+    from_epoch: u64,
+    continuous: bool,
+) -> Result<ReceiveOutput> {
     let bin = env_bin("ITS_ROUTING_BIN", "its-routing")?;
     let mut cmd = Command::new(&bin);
     cmd.arg("-c")
@@ -68,8 +79,10 @@ pub fn its_routing_receive_once(
         .arg("-o")
         .arg(out_wire)
         .arg("--timeout-secs")
-        .arg(timeout_secs.to_string())
-        .arg("--continuous");
+        .arg(timeout_secs.to_string());
+    if continuous {
+        cmd.arg("--continuous");
+    }
     if from_epoch > 0 {
         cmd.arg("--from-epoch").arg(from_epoch.to_string());
     }

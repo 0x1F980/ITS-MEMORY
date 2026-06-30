@@ -55,10 +55,35 @@ pub fn list_receipts() -> Result<Vec<GdirReceipt>> {
     Ok(out)
 }
 
+pub fn has_gdir_receipt() -> Result<bool> {
+    Ok(!list_receipts()?.is_empty())
+}
+
+pub fn has_blind_or_infra_receipt() -> Result<bool> {
+    Ok(list_receipts()?
+        .iter()
+        .any(|r| matches!(r.op.as_str(), "blind" | "sync" | "route")))
+}
+
+pub struct MintGdirOptions {
+    pub require_blind_or_infra: bool,
+}
+
 pub fn mint_gdir_coin() -> Result<GdirCoinManifest> {
+    mint_gdir_coin_options(&MintGdirOptions {
+        require_blind_or_infra: false,
+    })
+}
+
+pub fn mint_gdir_coin_options(opts: &MintGdirOptions) -> Result<GdirCoinManifest> {
     let receipts = list_receipts()?;
     if receipts.is_empty() {
         return Err(MemError::Coin("no gdir receipts to mint".into()));
+    }
+    if opts.require_blind_or_infra && !receipts.iter().any(|r| matches!(r.op.as_str(), "blind" | "sync" | "route")) {
+        return Err(MemError::Coin(
+            "GDIR mint requires blind/sync/route receipt (not channel-only mirror ops)".into(),
+        ));
     }
     let fp = contrib_fp()?;
     let payload = build_gdir_payload(&receipts);

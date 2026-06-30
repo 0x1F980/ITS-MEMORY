@@ -139,6 +139,31 @@ fn write_published_marker(pin_path: &Path, byte_span: u64) -> Result<()> {
     Ok(())
 }
 
+/// Refresh `hosted_seconds` on `.published` markers during validate sweep (per-pin sidecar).
+pub fn refresh_pin_hosted_markers(room_wire_pk: &str, pins: &[MemoryPin]) -> Result<()> {
+    let now = now_unix();
+    let pk = normalize_pk(room_wire_pk);
+    for pin in pins {
+        let Some(path) = find_pin_path(&pk, &pin.wire_hash)? else {
+            continue;
+        };
+        let marker = published_marker_path(&path);
+        if !marker.is_file() {
+            continue;
+        }
+        let Some(published_at) = read_published_at_marker(&marker)? else {
+            continue;
+        };
+        let hosted_seconds = now.saturating_sub(published_at);
+        let byte_span = pin.wire_bytes().map(|b| b.len() as u64).unwrap_or(0);
+        let text = format!(
+            "published_at: {published_at}\nbyte_span: {byte_span}\nhosted_seconds: {hosted_seconds}\n"
+        );
+        std::fs::write(marker, text)?;
+    }
+    Ok(())
+}
+
 /// Read `published_at` unix timestamp from a pin's `.published` marker, if present.
 pub fn published_at_for_pin_path(pin_path: &Path) -> Result<Option<u64>> {
     let marker = published_marker_path(pin_path);

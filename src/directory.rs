@@ -11,6 +11,7 @@ pub enum ChannelSortKey {
     LastEpoch,
     MemoryBytes,
     HostedSeconds,
+    MemoryWeightSeconds,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,8 +57,11 @@ impl ChannelSortKey {
             "hosted_seconds" | "hosting" | "duration" | "mirror_listed_seconds" => {
                 Ok(Self::HostedSeconds)
             }
+            "memory_weight_seconds" | "memory_weight" | "memory-preservation" => {
+                Ok(Self::MemoryWeightSeconds)
+            }
             _ => Err(MemError::Usage(format!(
-                "unknown channel sort key: {s} (frame_count|last_epoch|memory_bytes|hosted_seconds)"
+                "unknown channel sort key: {s} (frame_count|last_epoch|memory_bytes|hosted_seconds|memory_weight_seconds)"
             ))),
         }
     }
@@ -174,6 +178,11 @@ pub fn browse_gdir(
             entries.push(coin);
         }
     }
+    let cap = std::env::var("ITS_GDIR_FLATTEN_CAP_BPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500);
+    entries = flatten_gdir_view(entries, cap);
     sort_gdir(&mut entries, sort, order);
     for coin in &entries {
         println!(
@@ -194,6 +203,147 @@ pub fn browse(registry: Option<&Path>, sort: ChannelSortKey) -> Result<Vec<Chann
 
 pub fn discover_quiet_channel(registry: Option<&Path>) -> Result<Vec<ChannelCoinManifest>> {
     browse_channel(registry, ChannelSortKey::FrameCount, SortOrder::Asc)
+}
+
+pub fn discover_quiet_flat_channel(
+    registry: Option<&Path>,
+    cap_bps: u32,
+) -> Result<Vec<ChannelCoinManifest>> {
+    let mut entries = collect_channel_manifests(registry)?;
+    entries = flatten_channel_view(entries, cap_bps);
+    sort_channel(&mut entries, ChannelSortKey::FrameCount, SortOrder::Asc);
+    print_channel_entries(&entries);
+    Ok(entries)
+}
+
+pub fn discover_flat_gdir(registry: Option<&Path>, cap_bps: u32) -> Result<Vec<GdirCoinManifest>> {
+    let reg = registry
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(gdir_registry);
+    if !reg.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&reg)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(coin) = GdirCoinManifest::read_file(&path) {
+            entries.push(coin);
+        }
+    }
+    entries = flatten_gdir_view(entries, cap_bps);
+    sort_gdir(&mut entries, GdirSortKey::ContribBytes, SortOrder::Desc);
+    for coin in &entries {
+        println!(
+            "gdir-flat contrib_fp={} ops={} bytes={} seconds={} root={}…",
+            coin.contrib_fp,
+            coin.contrib_ops,
+            coin.contrib_bytes,
+            coin.contrib_seconds,
+            &coin.chain_root[..8.min(coin.chain_root.len())]
+        );
+    }
+    Ok(entries)
+}
+
+pub fn merge_channel_manifest(
+    local: &ChannelCoinManifest,
+    ingested: &ChannelCoinManifest,
+) -> ChannelCoinManifest {
+    if local.room_wire_pk != ingested.room_wire_pk {
+        return ingested.clone();
+    }
+    let pick_ingested = ingested.witness_count > local.witness_count
+        || (ingested.witness_count == local.witness_count
+            && ingested.memory_weight_seconds > local.memory_weight_seconds)
+        || (ingested.witness_count == local.witness_count
+            && ingested.memory_weight_seconds == local.memory_weight_seconds
+            && ingested.frame_count > local.frame_count);
+    if pick_ingested {
+        ingested.clone()
+    } else {
+        local.clone()
+    }
+}
+
+pub fn merge_gdir_manifest(local: &GdirCoinManifest, ingested: &GdirCoinManifest) -> GdirCoinManifest {
+    if local.contrib_fp != ingested.contrib_fp {
+        return ingested.clone();
+    }
+    if ingested.contrib_bytes > local.contrib_bytes || ingested.contrib_ops > local.contrib_ops {
+        ingested.clone()
+    } else {
+        local.clone()
+    }
+}
+
+pub fn flatten_channel_view(
+    mut entries: Vec<ChannelCoinManifest>,
+    cap_bps: u32,
+) -> Vec<ChannelCoinManifest> {
+    if entries.is_empty() {
+        return entries;
+    }
+    let total_bytes: u64 = entries.iter().map(|e| e.memory_bytes).sum::<u64>().max(1);
+    let cap = (total_bytes * cap_bps as u64) / 10000;
+    for e in &mut entries {
+        if e.memory_bytes > cap {
+            e.memory_bytes = cap;
+        }
+    }
+    entries
+}
+
+pub fn flatten_gdir_view(mut entries: Vec<GdirCoinManifest>, cap_bps: u32) -> Vec<GdirCoinManifest> {
+    if entries.is_empty() {
+        return entries;
+    }
+    let total_bytes: u64 = entries.iter().map(|e| e.contrib_bytes).sum::<u64>().max(1);
+    let cap = (total_bytes * cap_bps as u64) / 10000;
+    for e in &mut entries {
+        if e.contrib_bytes > cap {
+            e.contrib_bytes = cap;
+        }
+    }
+    entries
+}
+
+pub fn browse_gdir_flat(
+    registry: Option<&Path>,
+    cap_bps: u32,
+    order: SortOrder,
+) -> Result<Vec<GdirCoinManifest>> {
+    let reg = registry
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(gdir_registry);
+    if !reg.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&reg)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(coin) = GdirCoinManifest::read_file(&path) {
+            entries.push(coin);
+        }
+    }
+    entries = flatten_gdir_view(entries, cap_bps);
+    sort_gdir(&mut entries, GdirSortKey::ContribBytes, order);
+    for coin in &entries {
+        println!(
+            "gdir contrib_fp={} ops={} bytes={} seconds={} root={}…",
+            coin.contrib_fp,
+            coin.contrib_ops,
+            coin.contrib_bytes,
+            coin.contrib_seconds,
+            &coin.chain_root[..8.min(coin.chain_root.len())]
+        );
+    }
+    Ok(entries)
 }
 
 pub fn search_channel(
@@ -252,12 +402,13 @@ fn matches_channel_filters(coin: &ChannelCoinManifest, filters: &ChannelSearchFi
 fn print_channel_entries(entries: &[ChannelCoinManifest]) {
     for coin in entries {
         println!(
-            "channel room_wire_pk={} room_id_fp={} frames={} memory_bytes={} hosted_seconds={} pin_epoch_span={} message_hosted_span_seconds={} last_epoch={} root={}…",
+            "channel room_wire_pk={} room_id_fp={} frames={} memory_bytes={} hosted_seconds={} memory_weight_seconds={} pin_epoch_span={} message_hosted_span_seconds={} last_epoch={} root={}…",
             coin.room_wire_pk,
             coin.room_id_fp,
             coin.frame_count,
             coin.memory_bytes,
             coin.hosted_seconds,
+            coin.memory_weight_seconds,
             coin.pin_epoch_span,
             coin.message_hosted_span_seconds,
             coin.last_pool_epoch,
@@ -279,6 +430,9 @@ fn sort_channel(entries: &mut [ChannelCoinManifest], sort: ChannelSortKey, order
         ChannelSortKey::MemoryBytes => entries.sort_by(|a, b| cmp(a.memory_bytes, b.memory_bytes)),
         ChannelSortKey::HostedSeconds => {
             entries.sort_by(|a, b| cmp(a.hosted_seconds, b.hosted_seconds))
+        }
+        ChannelSortKey::MemoryWeightSeconds => {
+            entries.sort_by(|a, b| cmp(a.memory_weight_seconds, b.memory_weight_seconds))
         }
     }
 }

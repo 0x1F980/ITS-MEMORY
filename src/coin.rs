@@ -2,10 +2,14 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MemError, Result};
 use crate::pipe::{self, parse_ssc_link0_hex, sss_chain_generate, sss_chain_validate};
-use crate::host::{self, contrib_fp, hosted_seconds};
-use crate::mirror::{list_published_pins, published_at_for_pin};
-use crate::vault::normalize_pk;
+use crate::host::{contrib_fp, hosted_seconds, now_unix};
+use crate::gdir::has_gdir_receipt;
+use crate::ingest::ingest_channel_pool;
+use crate::mirror::{list_published_pins, published_at_for_pin, refresh_pin_hosted_markers};
+use crate::room_timelock::{room_dir_from_decrypt_pk, timelock_unlock_pool_epoch};
+use crate::vault::{has_pool_duty_witness, normalize_pk};
 use crate::store::list_pins;
+use crate::witness::{count_quorum_witnesses, require_quorum_met};
 use crate::wire::{room_id_fingerprint, ChannelCoinManifest, MemoryPin};
 
 pub type CoinManifest = ChannelCoinManifest;
@@ -19,9 +23,25 @@ pub struct MintOptions {
     pub decrypt_pk: Option<PathBuf>,
     pub decrypt_sk: Option<PathBuf>,
     pub quorum_replicas: Option<u64>,
+    pub require_quorum: Option<u64>,
     pub ssc_out: Option<PathBuf>,
     pub require_published: bool,
     pub registry_visible: bool,
+    pub require_global: bool,
+    pub timelock_unlock_epoch: Option<u64>,
+    pub room_dir: Option<PathBuf>,
+    pub pool_config: Option<PathBuf>,
+    pub ratchet_seed: Option<PathBuf>,
+}
+
+pub fn pin_set_hash(pins: &[MemoryPin]) -> String {
+    let mut hashes: Vec<&str> = pins.iter().map(|p| p.wire_hash.as_str()).collect();
+    hashes.sort_unstable();
+    wire_identity(hashes.join("|").as_bytes())
+}
+
+fn wire_identity(bytes: &[u8]) -> String {
+    crate::wire::wire_identity(bytes)
 }
 
 pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
@@ -46,7 +66,60 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         return Err(MemError::Coin("no pins to mint".into()));
     }
 
-    let memory_bytes: u64 = pins
+    if opts.require_global {
+        if !opts.require_published {
+            return Err(MemError::Coin(
+                "--global requires --require-published (duty mint)".into(),
+            ));
+        }
+        let quorum = opts.require_quorum.or(opts.quorum_replicas).unwrap_or(2);
+        if quorum < 2 {
+            return Err(MemError::Coin("--global requires --require-quorum >= 2".into()));
+        }
+        if !has_gdir_receipt()? {
+            return Err(MemError::Coin(
+                "--global requires GDIR receipt (run its-coin gdir record or its-memory blind-pull)".into(),
+            ));
+        }
+        if !has_pool_duty_witness() {
+            if let (Some(cfg), Some(ratchet)) = (&opts.pool_config, &opts.ratchet_seed) {
+                let n = ingest_channel_pool(cfg, ratchet, None, 2, 20)?;
+                if n == 0 && !has_pool_duty_witness() {
+                    return Err(MemError::Coin(
+                        "--global requires pool ingest witness (publish manifest to pool, then ingest-pool)".into(),
+                    ));
+                }
+            } else {
+                return Err(MemError::Coin(
+                    "--global requires pool duty witness (run ingest-pool after publish, or pass -c/--ratchet-seed for auto-ingest)".into(),
+                ));
+            }
+        }
+    }
+
+    let unlock_epoch = opts
+        .timelock_unlock_epoch
+        .or_else(|| {
+            opts.room_dir
+                .as_ref()
+                .and_then(|d| timelock_unlock_pool_epoch(d).ok().flatten())
+        })
+        .or_else(|| {
+            opts.decrypt_pk.as_ref().and_then(|pk| {
+                room_dir_from_decrypt_pk(pk)
+                    .and_then(|d| timelock_unlock_pool_epoch(&d).ok().flatten())
+            })
+        })
+        .unwrap_or(0);
+    let weight_pins: Vec<&MemoryPin> = if unlock_epoch > 0 {
+        pins.iter()
+            .filter(|p| p.pool_epoch >= unlock_epoch)
+            .collect()
+    } else {
+        pins.iter().collect()
+    };
+
+    let memory_bytes: u64 = weight_pins
         .iter()
         .map(|p| p.wire_bytes().map(|b| b.len() as u64))
         .collect::<Result<Vec<_>>>()?
@@ -54,6 +127,10 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         .sum();
     let hosted_secs = hosted_seconds(&pk_norm)?;
     let (pin_epoch_span, message_hosted_span_seconds) = pin_span_metrics(&pk_norm, &pins)?;
+    let (memory_weight_seconds, pin_hosted_min_seconds, pin_hosted_max_seconds) =
+        memory_weight_metrics(&pk_norm, &weight_pins)?;
+    let (timelock_epoch_span, timelock_sealed_frames) =
+        timelock_metrics(&pins, unlock_epoch);
 
     let mut last_seq = 0u64;
     let mut last_pool_epoch = 0u64;
@@ -89,6 +166,16 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
     if !sss_chain_validate(&coin_root_path(&pk_norm), &ssc_path)? {
         return Err(MemError::Coin("sss_chain validate failed after mint".into()));
     }
+
+    let quorum_required = opts
+        .require_quorum
+        .or(opts.quorum_replicas)
+        .unwrap_or(0);
+    if quorum_required > 0 {
+        require_quorum_met(&pk_norm, &chain_root, &pins, quorum_required)?;
+    }
+
+    let witness_count = count_quorum_witnesses(&pk_norm, &chain_root, &pin_set_hash(&pins))?;
     if let Some(ref out) = opts.ssc_out {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
@@ -112,6 +199,12 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         hosted_seconds: hosted_secs,
         pin_epoch_span,
         message_hosted_span_seconds,
+        memory_weight_seconds,
+        pin_hosted_min_seconds,
+        pin_hosted_max_seconds,
+        timelock_epoch_span,
+        timelock_sealed_frames,
+        witness_count,
         registry_visible: opts.registry_visible,
         quorum_replicas: opts.quorum_replicas,
         host_fp: Some(contrib_fp()?),
@@ -123,7 +216,28 @@ pub fn validate_coin(
     pin_dir: Option<&Path>,
     decrypt_pk: Option<&Path>,
     decrypt_sk: Option<&Path>,
+    room_dir: Option<&Path>,
 ) -> Result<()> {
+    let pk_norm = normalize_pk(&manifest.room_wire_pk);
+    let pins = if let Some(dir) = pin_dir {
+        load_pins_for_witness(dir, &pk_norm)?
+    } else if manifest.memory_bytes > 0 || manifest.hosted_seconds > 0 {
+        list_published_pins(&pk_norm)?
+    } else {
+        Vec::new()
+    };
+    if !pins.is_empty() {
+        let _ = refresh_pin_hosted_markers(&pk_norm, &pins);
+    }
+
+    let timelock_unlock = room_dir
+        .and_then(|d| timelock_unlock_pool_epoch(d).ok().flatten())
+        .or_else(|| {
+            decrypt_pk
+                .and_then(room_dir_from_decrypt_pk)
+                .and_then(|d| timelock_unlock_pool_epoch(&d).ok().flatten())
+        });
+
     let recomputed = mint_coin(&MintOptions {
         room_wire_pk: manifest.room_wire_pk.clone(),
         pin_dir: pin_dir.map(|p| p.to_path_buf()),
@@ -131,9 +245,15 @@ pub fn validate_coin(
         decrypt_pk: decrypt_pk.map(|p| p.to_path_buf()),
         decrypt_sk: decrypt_sk.map(|p| p.to_path_buf()),
         quorum_replicas: manifest.quorum_replicas,
+        require_quorum: manifest.quorum_replicas,
         ssc_out: None,
         require_published: manifest.memory_bytes > 0 || manifest.hosted_seconds > 0,
         registry_visible: manifest.registry_visible,
+        require_global: false,
+        timelock_unlock_epoch: timelock_unlock,
+        room_dir: room_dir.map(|p| p.to_path_buf()),
+        pool_config: None,
+        ratchet_seed: None,
     })?;
     if recomputed.chain_root != manifest.chain_root {
         return Err(MemError::Coin(format!(
@@ -155,11 +275,17 @@ pub fn validate_coin(
     {
         return Err(MemError::Coin("message_hosted_span_seconds mismatch".into()));
     }
+    if recomputed.memory_weight_seconds != manifest.memory_weight_seconds
+        && manifest.memory_weight_seconds > 0
+    {
+        return Err(MemError::Coin("memory_weight_seconds mismatch".into()));
+    }
     println!(
-        "Validated ITS-CHANNEL-COIN room_wire_pk={}… frames={} memory_bytes={} root={}… (SSS link_0)",
+        "Validated ITS-CHANNEL-COIN room_wire_pk={}… frames={} memory_bytes={} memory_weight_seconds={} root={}… (SSS link_0)",
         &manifest.room_wire_pk[..8.min(manifest.room_wire_pk.len())],
         manifest.frame_count,
         manifest.memory_bytes,
+        manifest.memory_weight_seconds,
         &manifest.chain_root[..8.min(manifest.chain_root.len())]
     );
     Ok(())
@@ -235,6 +361,56 @@ fn pin_span_metrics(room_wire_pk: &str, pins: &[MemoryPin]) -> Result<(u64, u64)
         0
     };
     Ok((pin_epoch_span, message_hosted_span_seconds))
+}
+
+fn memory_weight_metrics(
+    room_wire_pk: &str,
+    pins: &[&MemoryPin],
+) -> Result<(u64, u64, u64)> {
+    if pins.is_empty() {
+        return Ok((0, 0, 0));
+    }
+    let now = now_unix();
+    let mut per_pin = Vec::new();
+    for pin in pins {
+        if let Some(published_at) = published_at_for_pin(room_wire_pk, pin)? {
+            per_pin.push(now.saturating_sub(published_at));
+        }
+    }
+    if per_pin.is_empty() {
+        return Ok((0, 0, 0));
+    }
+    let memory_weight_seconds: u64 = per_pin.iter().sum();
+    let pin_hosted_min_seconds = *per_pin.iter().min().unwrap();
+    let pin_hosted_max_seconds = *per_pin.iter().max().unwrap();
+    Ok((
+        memory_weight_seconds,
+        pin_hosted_min_seconds,
+        pin_hosted_max_seconds,
+    ))
+}
+
+fn timelock_metrics(pins: &[MemoryPin], unlock_epoch: u64) -> (u64, u64) {
+    if unlock_epoch == 0 {
+        return (0, 0);
+    }
+    let sealed: Vec<&MemoryPin> = pins
+        .iter()
+        .filter(|p| p.pool_epoch < unlock_epoch)
+        .collect();
+    if sealed.is_empty() {
+        return (0, 0);
+    }
+    let min_epoch = sealed.iter().map(|p| p.pool_epoch).min().unwrap_or(0);
+    let max_epoch = sealed.iter().map(|p| p.pool_epoch).max().unwrap_or(0);
+    (
+        max_epoch.saturating_sub(min_epoch),
+        sealed.len() as u64,
+    )
+}
+
+pub fn load_pins_for_witness(dir: &Path, room_wire_pk: &str) -> Result<Vec<MemoryPin>> {
+    load_pins_from_dir(dir, room_wire_pk)
 }
 
 fn load_pins_from_dir(dir: &Path, room_wire_pk: &str) -> Result<Vec<MemoryPin>> {

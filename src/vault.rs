@@ -24,6 +24,9 @@ pub fn ensure_layout() -> Result<()> {
     std::fs::create_dir_all(gdir_registry())?;
     std::fs::create_dir_all(gdir_receipts_dir())?;
     std::fs::create_dir_all(mirrors_root())?;
+    std::fs::create_dir_all(witnesses_dir())?;
+    std::fs::create_dir_all(blind_shards_dir())?;
+    std::fs::create_dir_all(pool_ingest_staging())?;
     migrate_legacy_registry()?;
     Ok(())
 }
@@ -59,6 +62,43 @@ pub fn gdir_receipts_dir() -> PathBuf {
 
 pub fn mirrors_root() -> PathBuf {
     memory_home().join("mirrors")
+}
+
+pub fn witnesses_dir() -> PathBuf {
+    memory_home().join("witnesses")
+}
+
+pub fn blind_shards_dir() -> PathBuf {
+    memory_home().join("blind_shards")
+}
+
+pub fn pool_ingest_staging() -> PathBuf {
+    memory_home().join("pool_ingest")
+}
+
+pub fn pool_duty_witness_path() -> PathBuf {
+    pool_ingest_staging().join("duty_pool_witness.txt")
+}
+
+pub fn touch_pool_duty_witness() -> Result<()> {
+    std::fs::create_dir_all(pool_ingest_staging())?;
+    std::fs::write(
+        pool_duty_witness_path(),
+        format!("witness_at: {}\n", now_unix_for_vault()),
+    )?;
+    Ok(())
+}
+
+pub fn has_pool_duty_witness() -> bool {
+    pool_duty_witness_path().is_file()
+}
+
+fn now_unix_for_vault() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn mirror_room_dir(room_wire_pk: &str) -> PathBuf {

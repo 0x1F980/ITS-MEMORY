@@ -15,6 +15,13 @@
 | M50 | `scripts/pipe_its_memory_discover_quiet_e2e.sh` | `--order asc` / `discover-quiet` → quiet-room før spam-room |
 | M51 | `scripts/pipe_its_memory_search_max_frames_e2e.sh` | `--max-frames N` ekskluderer høj-aktivitet kanaler |
 | M52 | `scripts/pipe_its_memory_message_hosted_span_e2e.sh` | Staggered publish → `message_hosted_span_seconds` > 0, `pin_epoch_span` > 0 |
+| M53 | `scripts/pipe_its_memory_memory_weight_e2e.sh` | `memory_weight_seconds` > 0; pin delete → validate fails |
+| M54 | `scripts/pipe_its_memory_ingest_pool_e2e.sh` | A publish → B ingest-pool → browse match |
+| M55 | `scripts/pipe_its_memory_quorum_e2e.sh` | Solo `--require-quorum 2` fails; 2+ distinct witness_fp OK |
+| M56 | `scripts/pipe_its_memory_flatten_e2e.sh` | Mega + tiny channel; `discover-quiet-flat` shows both |
+| M57/M58 | `scripts/pipe_its_memory_blind_gdir_e2e.sh` | Blind shards have no `room_wire_pk`; GDIR mint `--require-blind` |
+| M59 | `scripts/pipe_its_memory_timelock_coin_e2e.sh` | Pre-unlock pins excluded from `memory_weight_seconds` |
+| M60/M61 | `scripts/pipe_its_memory_duty_mint_e2e.sh` | `--global` without GDIR fails; pin delete breaks validate |
 
 ITS-CHAT gates:
 
@@ -43,7 +50,9 @@ bash "$ITS_CHAT_DIR/scripts/pipe_its_chat_scroll_query_e2e.sh"
 ## Wire formats
 
 - `ITS-MEMORY-PIN/1` — see `src/wire.rs`
-- `ITS-CHANNEL-COIN/2` — kanal hosting (memory_bytes, hosted_seconds/mirror_listed_seconds, pin_epoch_span, message_hosted_span_seconds, registry_visible)
+- `ITS-CHANNEL-COIN/3` — kanal mindebevis (memory_weight_seconds, timelock fields, witness_count; v2 compatible)
+- `ITS-MEMORY-WITNESS/1` — quorum witness attestation
+- `ITS-MEMORY-SHARD/1` — blind GDIR shard (no room_wire_pk)
 - `ITS-GDIR-COIN/1` — global directory infra (ingen room_wire_pk)
 - Legacy `ITS-COIN/1` — alias for channel coin v1
 
@@ -57,4 +66,4 @@ No human identity fields in MEMORY/COIN layers. Pseudonym tags: `host_fp`, `cont
 | `coin/gdir/registry/` | GDIR coin manifests |
 | `coin/registry/` | Legacy — migrated on `ensure_layout()` |
 
-Optional pool sync: `scripts/sync_registry_pool.sh`.
+Optional pool sync: `scripts/sync_registry_pool.sh` (publish) or `--pull` (ingest).

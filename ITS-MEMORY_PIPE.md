@@ -1,5 +1,7 @@
 # ITS-MEMORY / ITS-COIN — subprocess contracts
 
+See [ITS-MEMORY_VISION.md](ITS-MEMORY_VISION.md) for metric semantics and quiet-discovery design.
+
 ## Environment
 
 | Variable | Default | Purpose |
@@ -42,7 +44,7 @@ its-memory host-status --room-wire-pk HEX
 ```
 
 `publish-pins` copies pins to `$ITS_MEMORY_HOME/mirrors/<room_wire_pk>/` with `.published` markers
-and updates the local host ledger (`hosted_seconds` after publish).
+and updates the local host ledger (`mirror_listed_seconds` / wire field `hosted_seconds` after publish).
 
 ## its-coin channel (ITS-CHANNEL-COIN/2)
 
@@ -52,11 +54,26 @@ its-coin channel mint --room-wire-pk HEX [--pin-dir PATH] [--require-published] 
 its-coin channel validate --manifest PATH [--pin-dir PATH]
 its-coin channel publish --manifest PATH [--registry PATH] [-c routing.toml --ratchet-seed PATH]
 its-coin channel browse [--sort frame_count|last_epoch|memory_bytes|hosted_seconds]
-its-coin channel search --min-frames N [--sort ...]
+  [--order asc|desc] [--discover quiet] [--registry PATH]
+its-coin channel discover-quiet [--registry PATH]
+its-coin channel search [--min-frames N] [--max-frames N] [--max-memory-bytes N]
+  [--max-hosted-seconds N] [--sort ...] [--order asc|desc] [--registry PATH]
 ```
 
 Registry default: `$ITS_MEMORY_HOME/coin/channel/registry/*.channel.coin.toml`.
 Legacy `$ITS_MEMORY_HOME/coin/registry/` is migrated on first `ensure_layout()`.
+
+### Channel coin metric fields
+
+| Field | Semantics |
+|-------|-----------|
+| `memory_bytes` | Aggregated hosted wire bytes |
+| `frame_count` | Published pin count |
+| `pin_epoch_span` | `max(pool_epoch) − min(pool_epoch)` |
+| `message_hosted_span_seconds` | `max(published_at) − min(published_at)` from `.published` markers |
+| `hosted_seconds` | Doc alias: **mirror_listed_seconds** — time since first publish on this host |
+| `host_fp` | 16-hex pseudonym from local `host.secret` (optional) |
+| `registry_visible` | `false` ⇒ excluded from browse/search |
 
 `chain_root` = SSS `link_0` hex from `sss_chain generate` over concatenated wire ciphertext bytes.
 
@@ -66,10 +83,11 @@ Legacy `$ITS_MEMORY_HOME/coin/registry/` is migrated on first `ensure_layout()`.
 its-coin gdir record --op mirror|sync|route [--byte-span N]
 its-coin gdir mint [--out PATH]
 its-coin gdir publish --manifest PATH [--registry PATH]
-its-coin gdir browse [--sort contrib_ops|contrib_bytes|contrib_seconds]
+its-coin gdir browse [--sort contrib_ops|contrib_bytes|contrib_seconds] [--order asc|desc]
 ```
 
 GDIR receipts and coins contain **no** `room_wire_pk` — aggregated directory infra only.
+`contrib_fp` is a 16-hex pseudonym from the same `host.secret` as channel `host_fp`.
 
 ## Pool registry sync (optional)
 
@@ -86,6 +104,8 @@ its-chat scroll --room ALIAS [--from-seq N] [--to-seq M] [--at-seq K]
   [--last K] [--limit K] [--after DATE] [--before DATE]
   [--memory-home PATH] [--mirror-dir PATH] [--fetch-dir PATH] [--no-strict-publish]
 its-chat room create --alias NAME --type chat [--registry visible|hidden]
+its-chat registry publish --room ALIAS
+its-chat room browse / join
 ```
 
 Subprocess: `its-memory fetch` (with epoch/limit/mirror prefilter) → local decrypt → ITS-FRAME query filter → display.

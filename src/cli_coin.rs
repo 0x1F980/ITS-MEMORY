@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use crate::coin::{mint_coin, validate_coin, MintOptions};
 use crate::directory::{
-    browse_channel, browse_gdir, publish_channel_manifest, publish_gdir_manifest,
-    publish_gdir_to_pool, publish_manifest, publish_to_pool, search_channel, ChannelSortKey,
-    GdirSortKey,
+    browse_channel, browse_gdir, discover_quiet_channel, publish_channel_manifest,
+    publish_gdir_manifest, publish_gdir_to_pool, publish_manifest, publish_to_pool,
+    search_channel, ChannelSearchFilters, ChannelSortKey, GdirSortKey, SortOrder,
 };
 use crate::error::{MemError, Result};
 use crate::gdir::{mint_gdir_coin, record_contrib, validate_gdir_coin};
@@ -42,6 +42,7 @@ fn dispatch_channel(args: &[String], _program: &str) -> Result<()> {
         "publish" => cmd_channel_publish(&args[1..]),
         "browse" => cmd_channel_browse(&args[1..]),
         "search" => cmd_channel_search(&args[1..]),
+        "discover-quiet" => discover_quiet_channel(flag_path(args, "--registry").as_deref()).map(|_| ()),
         _ => Err(MemError::Usage(format!("unknown channel command: {}", args[0]))),
     }
 }
@@ -157,28 +158,52 @@ fn cmd_gdir_browse(args: &[String]) -> Result<()> {
         .map(|s| GdirSortKey::parse(&s))
         .transpose()?
         .unwrap_or(GdirSortKey::ContribBytes);
-    browse_gdir(flag_path(args, "--registry").as_deref(), sort).map(|_| ())
+    let order = parse_order(args)?;
+    browse_gdir(flag_path(args, "--registry").as_deref(), sort, order).map(|_| ())
 }
 
 fn cmd_channel_browse(args: &[String]) -> Result<()> {
-    let sort = flag_str(args, "--sort")
-        .map(|s| ChannelSortKey::parse(&s))
-        .transpose()?
-        .unwrap_or(ChannelSortKey::FrameCount);
-    browse_channel(flag_path(args, "--registry").as_deref(), sort).map(|_| ())
+    let (sort, order) = if flag_str(args, "--discover").as_deref() == Some("quiet") {
+        (ChannelSortKey::FrameCount, SortOrder::Asc)
+    } else {
+        let sort = flag_str(args, "--sort")
+            .map(|s| ChannelSortKey::parse(&s))
+            .transpose()?
+            .unwrap_or(ChannelSortKey::FrameCount);
+        (sort, parse_order(args)?)
+    };
+    browse_channel(flag_path(args, "--registry").as_deref(), sort, order).map(|_| ())
 }
 
 fn cmd_channel_search(args: &[String]) -> Result<()> {
-    let min = flag_str(args, "--min-frames")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let filters = ChannelSearchFilters {
+        min_frames: flag_str(args, "--min-frames").and_then(|s| s.parse().ok()),
+        max_frames: flag_str(args, "--max-frames").and_then(|s| s.parse().ok()),
+        max_memory_bytes: flag_str(args, "--max-memory-bytes").and_then(|s| s.parse().ok()),
+        max_hosted_seconds: flag_str(args, "--max-hosted-seconds")
+            .or_else(|| flag_str(args, "--max-mirror-listed-seconds"))
+            .and_then(|s| s.parse().ok()),
+    };
     let sort = flag_str(args, "--sort")
         .map(|s| ChannelSortKey::parse(&s))
         .transpose()?
         .unwrap_or(ChannelSortKey::FrameCount);
-    let hits = search_channel(flag_path(args, "--registry").as_deref(), min, sort)?;
+    let order = parse_order(args)?;
+    let hits = search_channel(
+        flag_path(args, "--registry").as_deref(),
+        filters,
+        sort,
+        order,
+    )?;
     println!("search hits: {}", hits.len());
     Ok(())
+}
+
+fn parse_order(args: &[String]) -> Result<SortOrder> {
+    match flag_str(args, "--order") {
+        Some(s) => SortOrder::parse(&s),
+        None => Ok(SortOrder::Desc),
+    }
 }
 
 fn flag_str(args: &[String], name: &str) -> Option<String> {
@@ -207,15 +232,18 @@ Channel coin (per room_wire_pk — hosting/activity):
   {program} channel validate --manifest PATH [--pin-dir PATH]
   {program} channel publish --manifest PATH [--registry PATH] [--record-gdir] \\
     [-c routing.toml --ratchet-seed PATH]
-  {program} channel browse [--sort frame_count|memory_bytes|hosted_seconds|last_epoch]
-  {program} channel search --min-frames N [--sort ...]
+  {program} channel browse [--sort frame_count|memory_bytes|hosted_seconds|last_epoch] \\
+    [--order asc|desc] [--discover quiet] [--registry PATH]
+  {program} channel discover-quiet [--registry PATH]
+  {program} channel search [--min-frames N] [--max-frames N] [--max-memory-bytes N] \\
+    [--max-hosted-seconds N] [--sort ...] [--order asc|desc] [--registry PATH]
 
 Global directory coin (no room_wire_pk — infra contribution):
   {program} gdir record --op mirror|sync|route --byte-span N
   {program} gdir mint [--out PATH]
   {program} gdir validate --manifest PATH
   {program} gdir publish --manifest PATH [--registry PATH] [-c routing.toml --ratchet-seed PATH]
-  {program} gdir browse [--sort contrib_bytes|contrib_seconds|contrib_ops]
+  {program} gdir browse [--sort contrib_bytes|contrib_seconds|contrib_ops] [--order asc|desc]
 
 Legacy: mint|validate|publish|browse|search map to channel commands.
 "

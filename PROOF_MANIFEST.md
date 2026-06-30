@@ -12,6 +12,9 @@
 | M47 | `scripts/pipe_its_memory_host_status_e2e.sh` | `host-status` + mint efter publish → `hosted_seconds` > 0 |
 | M48 | `scripts/pipe_its_memory_gdir_e2e.sh` | GDIR coin uden `room_wire_pk`; separat browse |
 | M49 | `scripts/pipe_its_memory_scroll_query_e2e.sh` | `fetch --limit K` returnerer seneste K pins |
+| M50 | `scripts/pipe_its_memory_discover_quiet_e2e.sh` | `--order asc` / `discover-quiet` → quiet-room før spam-room |
+| M51 | `scripts/pipe_its_memory_search_max_frames_e2e.sh` | `--max-frames N` ekskluderer høj-aktivitet kanaler |
+| M52 | `scripts/pipe_its_memory_message_hosted_span_e2e.sh` | Staggered publish → `message_hosted_span_seconds` > 0, `pin_epoch_span` > 0 |
 
 ITS-CHAT gates:
 
@@ -40,11 +43,11 @@ bash "$ITS_CHAT_DIR/scripts/pipe_its_chat_scroll_query_e2e.sh"
 ## Wire formats
 
 - `ITS-MEMORY-PIN/1` — see `src/wire.rs`
-- `ITS-CHANNEL-COIN/2` — kanal hosting (memory_bytes, hosted_seconds, registry_visible)
+- `ITS-CHANNEL-COIN/2` — kanal hosting (memory_bytes, hosted_seconds/mirror_listed_seconds, pin_epoch_span, message_hosted_span_seconds, registry_visible)
 - `ITS-GDIR-COIN/1` — global directory infra (ingen room_wire_pk)
 - Legacy `ITS-COIN/1` — alias for channel coin v1
 
-No identity fields in MEMORY/COIN layers.
+No human identity fields in MEMORY/COIN layers. Pseudonym tags: `host_fp`, `contrib_fp` (16-hex from local host.secret).
 
 ## Registry layout
 

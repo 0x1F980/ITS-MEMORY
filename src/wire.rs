@@ -120,6 +120,12 @@ pub struct ChannelCoinManifest {
     pub memory_bytes: u64,
     #[serde(default)]
     pub hosted_seconds: u64,
+    /// `max(pool_epoch) - min(pool_epoch)` over published pins (message batch window).
+    #[serde(default)]
+    pub pin_epoch_span: u64,
+    /// `max(published_at) - min(published_at)` over published pins (0 if single pin).
+    #[serde(default)]
+    pub message_hosted_span_seconds: u64,
     #[serde(default = "default_registry_visible")]
     pub registry_visible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +157,11 @@ impl ChannelCoinManifest {
         if self.is_v2() {
             out.push_str(&format!("memory_bytes: {}\n", self.memory_bytes));
             out.push_str(&format!("hosted_seconds: {}\n", self.hosted_seconds));
+            out.push_str(&format!("pin_epoch_span: {}\n", self.pin_epoch_span));
+            out.push_str(&format!(
+                "message_hosted_span_seconds: {}\n",
+                self.message_hosted_span_seconds
+            ));
             out.push_str(&format!(
                 "registry_visible: {}\n",
                 if self.registry_visible { "true" } else { "false" }
@@ -168,6 +179,8 @@ impl ChannelCoinManifest {
     fn is_v2(&self) -> bool {
         self.memory_bytes > 0
             || self.hosted_seconds > 0
+            || self.pin_epoch_span > 0
+            || self.message_hosted_span_seconds > 0
             || !self.registry_visible
             || self.host_fp.is_some()
     }
@@ -188,6 +201,8 @@ impl ChannelCoinManifest {
         let mut last_pool_epoch = 0u64;
         let mut memory_bytes = 0u64;
         let mut hosted_seconds = 0u64;
+        let mut pin_epoch_span = 0u64;
+        let mut message_hosted_span_seconds = 0u64;
         let mut registry_visible = true;
         let mut quorum_replicas = None;
         let mut host_fp = None;
@@ -218,6 +233,16 @@ impl ChannelCoinManifest {
                     .trim()
                     .parse()
                     .map_err(|_| MemError::Coin("hosted_seconds".into()))?;
+            } else if let Some(v) = line.strip_prefix("pin_epoch_span:") {
+                pin_epoch_span = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("pin_epoch_span".into()))?;
+            } else if let Some(v) = line.strip_prefix("message_hosted_span_seconds:") {
+                message_hosted_span_seconds = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Coin("message_hosted_span_seconds".into()))?;
             } else if let Some(v) = line.strip_prefix("registry_visible:") {
                 registry_visible = matches!(v.trim(), "true" | "1" | "yes");
             } else if let Some(v) = line.strip_prefix("quorum_replicas:") {
@@ -238,6 +263,8 @@ impl ChannelCoinManifest {
             last_pool_epoch,
             memory_bytes,
             hosted_seconds,
+            pin_epoch_span,
+            message_hosted_span_seconds,
             registry_visible,
             quorum_replicas,
             host_fp,

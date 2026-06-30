@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{MemError, Result};
 use crate::pipe::{self, parse_ssc_link0_hex, sss_chain_generate, sss_chain_validate};
 use crate::host::{self, contrib_fp, hosted_seconds};
-use crate::mirror::list_published_pins;
+use crate::mirror::{list_published_pins, published_at_for_pin};
 use crate::vault::normalize_pk;
 use crate::store::list_pins;
 use crate::wire::{room_id_fingerprint, ChannelCoinManifest, MemoryPin};
@@ -53,6 +53,7 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         .into_iter()
         .sum();
     let hosted_secs = hosted_seconds(&pk_norm)?;
+    let (pin_epoch_span, message_hosted_span_seconds) = pin_span_metrics(&pk_norm, &pins)?;
 
     let mut last_seq = 0u64;
     let mut last_pool_epoch = 0u64;
@@ -109,6 +110,8 @@ pub fn mint_coin(opts: &MintOptions) -> Result<CoinManifest> {
         last_pool_epoch,
         memory_bytes,
         hosted_seconds: hosted_secs,
+        pin_epoch_span,
+        message_hosted_span_seconds,
         registry_visible: opts.registry_visible,
         quorum_replicas: opts.quorum_replicas,
         host_fp: Some(contrib_fp()?),
@@ -143,6 +146,14 @@ pub fn validate_coin(
     }
     if recomputed.memory_bytes != manifest.memory_bytes && manifest.memory_bytes > 0 {
         return Err(MemError::Coin("memory_bytes mismatch".into()));
+    }
+    if recomputed.pin_epoch_span != manifest.pin_epoch_span && manifest.pin_epoch_span > 0 {
+        return Err(MemError::Coin("pin_epoch_span mismatch".into()));
+    }
+    if recomputed.message_hosted_span_seconds != manifest.message_hosted_span_seconds
+        && manifest.message_hosted_span_seconds > 0
+    {
+        return Err(MemError::Coin("message_hosted_span_seconds mismatch".into()));
     }
     println!(
         "Validated ITS-CHANNEL-COIN room_wire_pk={}… frames={} memory_bytes={} root={}… (SSS link_0)",
@@ -200,6 +211,30 @@ fn generate_sss_chain_root(room_wire_pk: &str, payload: &[u8]) -> Result<(String
     let ssc_text = std::fs::read_to_string(&ssc_path)?;
     let link0 = parse_ssc_link0_hex(&ssc_text)?;
     Ok((link0, ssc_path))
+}
+
+fn pin_span_metrics(room_wire_pk: &str, pins: &[MemoryPin]) -> Result<(u64, u64)> {
+    if pins.is_empty() {
+        return Ok((0, 0));
+    }
+    let min_epoch = pins.iter().map(|p| p.pool_epoch).min().unwrap_or(0);
+    let max_epoch = pins.iter().map(|p| p.pool_epoch).max().unwrap_or(0);
+    let pin_epoch_span = max_epoch.saturating_sub(min_epoch);
+
+    let mut published_times = Vec::new();
+    for pin in pins {
+        if let Some(ts) = published_at_for_pin(room_wire_pk, pin)? {
+            published_times.push(ts);
+        }
+    }
+    let message_hosted_span_seconds = if published_times.len() >= 2 {
+        let min_ts = *published_times.iter().min().unwrap();
+        let max_ts = *published_times.iter().max().unwrap();
+        max_ts.saturating_sub(min_ts)
+    } else {
+        0
+    };
+    Ok((pin_epoch_span, message_hosted_span_seconds))
 }
 
 fn load_pins_from_dir(dir: &Path, room_wire_pk: &str) -> Result<Vec<MemoryPin>> {
@@ -266,6 +301,28 @@ mod tests {
         let b = coin_root_material("aa".repeat(64).as_str());
         assert_eq!(a, b);
         assert!(a.starts_with(b"ITS-COIN-sss-root-v1"));
+    }
+
+    #[test]
+    fn pin_span_metrics_from_pins() {
+        let pins = vec![
+            MemoryPin {
+                room_wire_pk: "aa".repeat(32),
+                pool_epoch: 3,
+                wire_b64: String::new(),
+                seq_hint: None,
+                wire_hash: "a".repeat(64),
+            },
+            MemoryPin {
+                room_wire_pk: "aa".repeat(32),
+                pool_epoch: 11,
+                wire_b64: String::new(),
+                seq_hint: None,
+                wire_hash: "b".repeat(64),
+            },
+        ];
+        let (epoch_span, _) = pin_span_metrics("aa".repeat(32).as_str(), &pins).unwrap();
+        assert_eq!(epoch_span, 8);
     }
 
     #[test]

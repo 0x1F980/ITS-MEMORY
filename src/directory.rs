@@ -20,13 +20,42 @@ pub enum GdirSortKey {
     ContribSeconds,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
+impl SortOrder {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "asc" | "ascending" | "low" => Ok(Self::Asc),
+            "desc" | "descending" | "high" => Ok(Self::Desc),
+            _ => Err(MemError::Usage(format!(
+                "unknown sort order: {s} (asc|desc)"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChannelSearchFilters {
+    pub min_frames: Option<u64>,
+    pub max_frames: Option<u64>,
+    pub max_memory_bytes: Option<u64>,
+    pub max_hosted_seconds: Option<u64>,
+}
+
 impl ChannelSortKey {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "frame_count" | "frames" | "activity" => Ok(Self::FrameCount),
             "last_epoch" | "last_pool_epoch" | "epoch" => Ok(Self::LastEpoch),
             "memory_bytes" | "memory" | "storage" => Ok(Self::MemoryBytes),
-            "hosted_seconds" | "hosting" | "duration" => Ok(Self::HostedSeconds),
+            "hosted_seconds" | "hosting" | "duration" | "mirror_listed_seconds" => {
+                Ok(Self::HostedSeconds)
+            }
             _ => Err(MemError::Usage(format!(
                 "unknown channel sort key: {s} (frame_count|last_epoch|memory_bytes|hosted_seconds)"
             ))),
@@ -113,25 +142,22 @@ pub fn publish_gdir_to_pool(
     Ok(())
 }
 
-pub fn browse_channel(registry: Option<&Path>, sort: ChannelSortKey) -> Result<Vec<ChannelCoinManifest>> {
+pub fn browse_channel(
+    registry: Option<&Path>,
+    sort: ChannelSortKey,
+    order: SortOrder,
+) -> Result<Vec<ChannelCoinManifest>> {
     let mut entries = collect_channel_manifests(registry)?;
-    sort_channel(&mut entries, sort);
-    for coin in &entries {
-        println!(
-            "channel room_wire_pk={} room_id_fp={} frames={} memory_bytes={} hosted_seconds={} last_epoch={} root={}…",
-            coin.room_wire_pk,
-            coin.room_id_fp,
-            coin.frame_count,
-            coin.memory_bytes,
-            coin.hosted_seconds,
-            coin.last_pool_epoch,
-            &coin.chain_root[..8.min(coin.chain_root.len())]
-        );
-    }
+    sort_channel(&mut entries, sort, order);
+    print_channel_entries(&entries);
     Ok(entries)
 }
 
-pub fn browse_gdir(registry: Option<&Path>, sort: GdirSortKey) -> Result<Vec<GdirCoinManifest>> {
+pub fn browse_gdir(
+    registry: Option<&Path>,
+    sort: GdirSortKey,
+    order: SortOrder,
+) -> Result<Vec<GdirCoinManifest>> {
     let reg = registry
         .map(|p| p.to_path_buf())
         .unwrap_or_else(gdir_registry);
@@ -148,7 +174,7 @@ pub fn browse_gdir(registry: Option<&Path>, sort: GdirSortKey) -> Result<Vec<Gdi
             entries.push(coin);
         }
     }
-    sort_gdir(&mut entries, sort);
+    sort_gdir(&mut entries, sort, order);
     for coin in &entries {
         println!(
             "gdir contrib_fp={} ops={} bytes={} seconds={} root={}…",
@@ -163,19 +189,24 @@ pub fn browse_gdir(registry: Option<&Path>, sort: GdirSortKey) -> Result<Vec<Gdi
 }
 
 pub fn browse(registry: Option<&Path>, sort: ChannelSortKey) -> Result<Vec<ChannelCoinManifest>> {
-    browse_channel(registry, sort)
+    browse_channel(registry, sort, SortOrder::Desc)
+}
+
+pub fn discover_quiet_channel(registry: Option<&Path>) -> Result<Vec<ChannelCoinManifest>> {
+    browse_channel(registry, ChannelSortKey::FrameCount, SortOrder::Asc)
 }
 
 pub fn search_channel(
     registry: Option<&Path>,
-    min_frames: u64,
+    filters: ChannelSearchFilters,
     sort: ChannelSortKey,
+    order: SortOrder,
 ) -> Result<Vec<ChannelCoinManifest>> {
-    let all = browse_channel(registry, sort)?;
-    Ok(all
-        .into_iter()
-        .filter(|c| c.frame_count >= min_frames)
-        .collect())
+    let mut entries = collect_channel_manifests(registry)?;
+    sort_channel(&mut entries, sort, order);
+    entries.retain(|c| matches_channel_filters(c, &filters));
+    print_channel_entries(&entries);
+    Ok(entries)
 }
 
 pub fn search(
@@ -183,28 +214,85 @@ pub fn search(
     min_frames: u64,
     sort: ChannelSortKey,
 ) -> Result<Vec<ChannelCoinManifest>> {
-    search_channel(registry, min_frames, sort)
+    search_channel(
+        registry,
+        ChannelSearchFilters {
+            min_frames: Some(min_frames),
+            ..Default::default()
+        },
+        sort,
+        SortOrder::Desc,
+    )
 }
 
-fn sort_channel(entries: &mut [ChannelCoinManifest], sort: ChannelSortKey) {
-    match sort {
-        ChannelSortKey::FrameCount => entries.sort_by(|a, b| b.frame_count.cmp(&a.frame_count)),
-        ChannelSortKey::LastEpoch => {
-            entries.sort_by(|a, b| b.last_pool_epoch.cmp(&a.last_pool_epoch))
+fn matches_channel_filters(coin: &ChannelCoinManifest, filters: &ChannelSearchFilters) -> bool {
+    if let Some(min) = filters.min_frames {
+        if coin.frame_count < min {
+            return false;
         }
-        ChannelSortKey::MemoryBytes => entries.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes)),
+    }
+    if let Some(max) = filters.max_frames {
+        if coin.frame_count > max {
+            return false;
+        }
+    }
+    if let Some(max) = filters.max_memory_bytes {
+        if coin.memory_bytes > max {
+            return false;
+        }
+    }
+    if let Some(max) = filters.max_hosted_seconds {
+        if coin.hosted_seconds > max {
+            return false;
+        }
+    }
+    true
+}
+
+fn print_channel_entries(entries: &[ChannelCoinManifest]) {
+    for coin in entries {
+        println!(
+            "channel room_wire_pk={} room_id_fp={} frames={} memory_bytes={} hosted_seconds={} pin_epoch_span={} message_hosted_span_seconds={} last_epoch={} root={}…",
+            coin.room_wire_pk,
+            coin.room_id_fp,
+            coin.frame_count,
+            coin.memory_bytes,
+            coin.hosted_seconds,
+            coin.pin_epoch_span,
+            coin.message_hosted_span_seconds,
+            coin.last_pool_epoch,
+            &coin.chain_root[..8.min(coin.chain_root.len())]
+        );
+    }
+}
+
+fn sort_channel(entries: &mut [ChannelCoinManifest], sort: ChannelSortKey, order: SortOrder) {
+    let cmp = |a: u64, b: u64| match order {
+        SortOrder::Asc => a.cmp(&b),
+        SortOrder::Desc => b.cmp(&a),
+    };
+    match sort {
+        ChannelSortKey::FrameCount => entries.sort_by(|a, b| cmp(a.frame_count, b.frame_count)),
+        ChannelSortKey::LastEpoch => {
+            entries.sort_by(|a, b| cmp(a.last_pool_epoch, b.last_pool_epoch))
+        }
+        ChannelSortKey::MemoryBytes => entries.sort_by(|a, b| cmp(a.memory_bytes, b.memory_bytes)),
         ChannelSortKey::HostedSeconds => {
-            entries.sort_by(|a, b| b.hosted_seconds.cmp(&a.hosted_seconds))
+            entries.sort_by(|a, b| cmp(a.hosted_seconds, b.hosted_seconds))
         }
     }
 }
 
-fn sort_gdir(entries: &mut [GdirCoinManifest], sort: GdirSortKey) {
+fn sort_gdir(entries: &mut [GdirCoinManifest], sort: GdirSortKey, order: SortOrder) {
+    let cmp = |a: u64, b: u64| match order {
+        SortOrder::Asc => a.cmp(&b),
+        SortOrder::Desc => b.cmp(&a),
+    };
     match sort {
-        GdirSortKey::ContribOps => entries.sort_by(|a, b| b.contrib_ops.cmp(&a.contrib_ops)),
-        GdirSortKey::ContribBytes => entries.sort_by(|a, b| b.contrib_bytes.cmp(&a.contrib_bytes)),
+        GdirSortKey::ContribOps => entries.sort_by(|a, b| cmp(a.contrib_ops, b.contrib_ops)),
+        GdirSortKey::ContribBytes => entries.sort_by(|a, b| cmp(a.contrib_bytes, b.contrib_bytes)),
         GdirSortKey::ContribSeconds => {
-            entries.sort_by(|a, b| b.contrib_seconds.cmp(&a.contrib_seconds))
+            entries.sort_by(|a, b| cmp(a.contrib_seconds, b.contrib_seconds))
         }
     }
 }

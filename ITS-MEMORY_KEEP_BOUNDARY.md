@@ -8,8 +8,8 @@
 |-----------|----------|------|
 | ITS-MEMORY-PIN/1 | `src/wire.rs`, `src/pin.rs`, `src/store.rs` | Neutral ciphertext mirror |
 | Pin / fetch CLI | `src/cli_memory.rs`, `its-memory` bin | Pool `--follow` ingest, export |
-| ITS-COIN/1 | `src/wire.rs`, `src/coin.rs` | SSS chain head (`link_0`) over pin payload span |
-| Directory | `src/directory.rs`, `its-coin` bin | publish / browse / search |
+| ITS-CHANNEL-COIN/2 | `src/wire.rs`, `src/coin.rs` | SSS chain head (`link_0`) over pin payload span |
+| Directory | `src/directory.rs`, `its-coin` bin | publish / browse / search / quiet discovery |
 | Vault | `src/vault.rs` | `~/.its/memory/` pins + coin registry |
 | Subprocess glue | `src/pipe.rs` | PATH-only integration |
 
@@ -31,4 +31,19 @@ its-coin mint    → sss_chain generate (root=room_wire_pk material, total-bytes
 its-chat scroll  → its-memory fetch (subprocess) → its_asymmetric decrypt
 ```
 
-No host identity fields in pins or coin manifests.
+## Pseudonym fingerprints (not “no identity”)
+
+| Field | Source | Semantics |
+|-------|--------|-----------|
+| `host_fp` | First 16 hex of `host.secret` | Channel coin — pseudonymous host tag |
+| `contrib_fp` | Same `host.secret` material | GDIR coin — pseudonymous infra contributor |
+
+These are **local pseudonyms**, not legal-name identity and not room membership proofs.
+No human-readable names in pins or coin manifests.
+
+## No plaintext on wire
+
+Pins and coin manifests expose ciphertext counts, epochs, and SSS roots only.
+Message content requires `room.secret` (ITS-asymmetric decrypt).
+
+See [ITS-MEMORY_VISION.md](ITS-MEMORY_VISION.md) for full postulates.

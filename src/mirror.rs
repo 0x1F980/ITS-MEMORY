@@ -28,9 +28,13 @@ pub fn publish_pins(room_wire_pk: &str) -> Result<usize> {
         );
         let dest = mirror_dir.join(&dest_name);
         pin.write_file(&dest)?;
-        write_published_marker(&dest, wire.len() as u64)?;
+        if !is_published_pin_path(&dest) {
+            write_published_marker(&dest, wire.len() as u64)?;
+        }
         if let Some(local) = src {
-            write_published_marker(&local, wire.len() as u64)?;
+            if !is_published_pin_path(&local) {
+                write_published_marker(&local, wire.len() as u64)?;
+            }
         }
         host::touch_room_published(&pk, wire.len() as u64)?;
         published += 1;
@@ -133,6 +137,53 @@ fn write_published_marker(pin_path: &Path, byte_span: u64) -> Result<()> {
     );
     std::fs::write(marker, text)?;
     Ok(())
+}
+
+/// Read `published_at` unix timestamp from a pin's `.published` marker, if present.
+pub fn published_at_for_pin_path(pin_path: &Path) -> Result<Option<u64>> {
+    let marker = published_marker_path(pin_path);
+    if !marker.is_file() {
+        return Ok(None);
+    }
+    read_published_at_marker(&marker)
+}
+
+/// Resolve a pin file (local vault or mirror) and return its `published_at` timestamp.
+pub fn published_at_for_pin(room_wire_pk: &str, pin: &MemoryPin) -> Result<Option<u64>> {
+    let pk = normalize_pk(room_wire_pk);
+    if let Some(path) = find_pin_path(&pk, &pin.wire_hash)? {
+        if let Some(ts) = published_at_for_pin_path(&path)? {
+            return Ok(Some(ts));
+        }
+    }
+    let mirror_dir = mirror_room_dir(&pk);
+    if mirror_dir.is_dir() {
+        for entry in std::fs::read_dir(&mirror_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("pin") {
+                continue;
+            }
+            let mirror_pin = MemoryPin::read_file(&path)?;
+            if mirror_pin.wire_hash == pin.wire_hash {
+                return published_at_for_pin_path(&path);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn read_published_at_marker(marker: &Path) -> Result<Option<u64>> {
+    let text = std::fs::read_to_string(marker)?;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("published_at:") {
+            return Ok(Some(
+                v.trim()
+                    .parse()
+                    .map_err(|_| MemError::Store("published_at".into()))?,
+            ));
+        }
+    }
+    Ok(None)
 }
 
 fn find_pin_path(room_wire_pk: &str, wire_hash: &str) -> Result<Option<PathBuf>> {
